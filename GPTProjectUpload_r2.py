@@ -1,19 +1,18 @@
 import os
 import tkinter as tk
-from tkinter import filedialog
+from tkinter import filedialog, messagebox
 import zipfile
 import datetime
-import argparse
 import json
+from tkinter import scrolledtext
+import shutil
 
 LAST_DIRECTORY_FILE = os.path.expanduser("~/.last_directory.json")
-
 
 def save_last_directory(directory):
     """Save the last visited directory to a file."""
     with open(LAST_DIRECTORY_FILE, 'w') as f:
         json.dump({"last_directory": directory}, f)
-
 
 def load_last_directory():
     """Load the last visited directory from a file, if it exists."""
@@ -26,32 +25,8 @@ def load_last_directory():
             return None
     return None
 
-
-def select_directory():
-    """
-    Opens a tkinter dialog to select a directory.
-    Returns the selected directory path or None if cancelled.
-    """
-    root = tk.Tk()
-    root.withdraw()  # Hide the main window
-
-    initial_dir = load_last_directory() or "."
-
-    directory_path = filedialog.askdirectory(
-        title="Select Project Directory",
-        initialdir=initial_dir
-    )
-
-    if directory_path:
-        save_last_directory(directory_path)
-
-    return directory_path
-
-
 def extract_imports(file_content):
-    """
-    Extracts the import statements from a Python file.
-    """
+    """Extracts the import statements from a Python file."""
     imports = []
     for line in file_content.splitlines():
         line = line.strip()
@@ -59,12 +34,8 @@ def extract_imports(file_content):
             imports.append(line)
     return imports
 
-
 def create_project_document(directory_path, compress_output=False):
-    """
-    Creates a Claude-formatted document containing all Python files in the specified directory,
-    excluding specific folders like .venv, including metadata and optional compression.
-    """
+    """Creates an XML document containing all Python files in the specified directory."""
     excluded_dirs = {".venv", "__pycache__", ".idea", ".git"}
     output = "<documents>"
     log = []  # Track errors and processing information
@@ -127,42 +98,89 @@ def create_project_document(directory_path, compress_output=False):
         os.remove(output_path)  # Remove uncompressed file
         output_path = zip_path
 
-    # Write log file
-    log_path = os.path.join(directory_path, "processing_log.txt")
-    with open(log_path, 'w', encoding='utf-8') as log_file:
-        log_file.write("\n".join(log))
+    return output_path, log
 
-    print(f"\nProcessed {len(python_files)} Python files:")
-    for file in python_files:
-        print(f"- {os.path.relpath(file, directory_path)}")
-    print(f"\nOutput saved to: {output_path}")
-    if log:
-        print(f"\nErrors logged to: {log_path}")
+def copy_file():
+    """Copies the generated XML file to a selected location."""
+    source_path = os.path.join(dir_path.get(), "project_document.xml")
+    if not os.path.exists(source_path):
+        messagebox.showerror("Error", "No generated XML file to copy.")
+        return
 
+    destination_path = filedialog.asksaveasfilename(
+        title="Save XML File As",
+        defaultextension=".xml",
+        filetypes=[("XML files", "*.xml"), ("All files", "*.*")]
+    )
 
-def main():
-    while True:
-        parser = argparse.ArgumentParser(description="Generate a project document for Python files.")
-        parser.add_argument("--directory", type=str, help="Path to the project directory.", default=None)
-        parser.add_argument("--compress", action="store_true", help="Compress the output XML file into a ZIP archive.")
+    if destination_path:
+        try:
+            shutil.copy(source_path, destination_path)
+            messagebox.showinfo("Success", f"File copied to {destination_path}")
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to copy file: {e}")
 
-        args = parser.parse_args()
+def generate_xml():
+    """Handles the XML generation process when the button is clicked."""
+    directory = dir_path.get()
+    if not os.path.exists(directory):
+        messagebox.showerror("Error", "Please select a valid directory.")
+        return
 
-        if not args.directory:
-            print("Please select your project directory...")
-            args.directory = select_directory()
+    try:
+        output_path, log = create_project_document(directory)
+        with open(output_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+            text_area.delete("1.0", tk.END)
+            text_area.insert(tk.END, content)
+            status_label.config(text=f"Generated: {output_path}")
+    except Exception as e:
+        messagebox.showerror("Error", f"An error occurred: {e}")
 
-        if args.directory:
-            print(f"Selected directory: {args.directory}")
-            create_project_document(args.directory, compress_output=args.compress)
-        else:
-            print("No directory selected. Exiting.")
-            break
+def select_directory():
+    """Opens a dialog to select a directory."""
+    initial_dir = load_last_directory() or "."
+    selected_dir = filedialog.askdirectory(initialdir=initial_dir)
+    if selected_dir:
+        save_last_directory(selected_dir)
+        dir_path.set(selected_dir)
 
-        repeat = input("Do you want to process another directory? (y/n): ").strip().lower()
-        if repeat != 'y':
-            break
+# Set up the main Tkinter window
+root = tk.Tk()
+root.title("Project Document Generator")
+root.geometry("800x600")
 
+dir_path = tk.StringVar()
 
-if __name__ == "__main__":
-    main()
+# Directory selection frame
+frame = tk.Frame(root)
+frame.pack(pady=10)
+
+dir_label = tk.Label(frame, text="Select Directory:")
+dir_label.pack(side=tk.LEFT, padx=5)
+
+dir_entry = tk.Entry(frame, textvariable=dir_path, width=50)
+dir_entry.pack(side=tk.LEFT, padx=5)
+
+browse_button = tk.Button(frame, text="Browse", command=select_directory)
+browse_button.pack(side=tk.LEFT, padx=5)
+
+# Buttons for generate and copy
+button_frame = tk.Frame(root)
+button_frame.pack(pady=10)
+
+generate_button = tk.Button(button_frame, text="Generate XML", command=generate_xml)
+generate_button.pack(side=tk.LEFT, padx=10)
+
+copy_button = tk.Button(button_frame, text="Copy File", command=copy_file)
+copy_button.pack(side=tk.LEFT, padx=10)
+
+# Text area to display output
+text_area = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=90, height=25)
+text_area.pack(pady=10)
+
+# Status label
+status_label = tk.Label(root, text="", anchor="w")
+status_label.pack(fill=tk.X, padx=5, pady=5)
+
+root.mainloop()
