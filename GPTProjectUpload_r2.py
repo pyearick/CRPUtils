@@ -6,6 +6,7 @@ import datetime
 import json
 from tkinter import scrolledtext
 import shutil
+import pyperclip
 
 LAST_DIRECTORY_FILE = os.path.expanduser("~/.last_directory.json")
 
@@ -101,24 +102,17 @@ def create_project_document(directory_path, compress_output=False):
     return output_path, log
 
 def copy_file():
-    """Copies the generated XML file to a selected location."""
+    """Copies the generated XML file path to the clipboard."""
     source_path = os.path.join(dir_path.get(), "project_document.xml")
     if not os.path.exists(source_path):
         messagebox.showerror("Error", "No generated XML file to copy.")
         return
 
-    destination_path = filedialog.asksaveasfilename(
-        title="Save XML File As",
-        defaultextension=".xml",
-        filetypes=[("XML files", "*.xml"), ("All files", "*.*")]
-    )
-
-    if destination_path:
-        try:
-            shutil.copy(source_path, destination_path)
-            messagebox.showinfo("Success", f"File copied to {destination_path}")
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to copy file: {e}")
+    try:
+        pyperclip.copy(source_path)
+        messagebox.showinfo("Success", f"File path copied to clipboard: {source_path}")
+    except Exception as e:
+        messagebox.showerror("Error", f"Failed to copy file path: {e}")
 
 def generate_xml():
     """Handles the XML generation process when the button is clicked."""
