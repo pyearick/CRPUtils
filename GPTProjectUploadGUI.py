@@ -37,7 +37,13 @@ def extract_imports(file_content):
 
 def create_project_document(directory_path, compress_output=False):
     """Creates an XML document containing all Python files in the specified directory."""
-    excluded_dirs = {".venv", "__pycache__", ".idea", ".git"}
+    excluded_dirs = {".venv", "venv", "__pycache__", ".idea", ".git", ".venvBISQL001", "Archive",
+                     "AST-Neo4J","CRPML", "LangChain", "ProdDev(tf Keras)", "SQLAlchemyTest",
+                     "SQLAlchemy", "SplitExcelCommas", "SynapseML", "TheTrifecta", "chardet_csv_errorcheck",
+                     "flaskDash", "ADILoad", "ADI_Import","AutoEyeballs", "exportMongoDBToSQL", "dbTest",
+                     "Requirements-txt_Update", "OEMPartPriceUpload", "PartSetupTemplateBuilder",
+                     "HTSUS", "CommitsGH", "HelperScripts", "ebayCRPOE", "ebayWT_NF_VendorSearch", "PartsVoice_NF",
+                     "InternetDataImport"}  # Direct
     output = "<documents>"
     log = []  # Track errors and processing information
 
@@ -57,6 +63,7 @@ def create_project_document(directory_path, compress_output=False):
     for index, file_path in enumerate(python_files, 1):
         relative_path = os.path.relpath(file_path, directory_path)
         try:
+            print(f"Processing file: {relative_path}")  # Debugging output
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
 
@@ -88,16 +95,22 @@ def create_project_document(directory_path, compress_output=False):
 
     # Write to output file
     output_path = os.path.join(directory_path, "project_document.xml")
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(output)
+    try:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(output)
+    except Exception as e:
+        raise IOError(f"Failed to write file {output_path}: {e}")
 
     # Optionally compress the output
     if compress_output:
         zip_path = output_path.replace(".xml", ".zip")
-        with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
-            zipf.write(output_path, arcname="project_document.xml")
-        os.remove(output_path)  # Remove uncompressed file
-        output_path = zip_path
+        try:
+            with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zipf:
+                zipf.write(output_path, arcname="project_document.xml")
+            os.remove(output_path)  # Remove uncompressed file
+            output_path = zip_path
+        except Exception as e:
+            raise IOError(f"Failed to compress file {zip_path}: {e}")
 
     return output_path, log
 
@@ -122,13 +135,16 @@ def generate_xml():
         return
 
     try:
+        print(f"Generating XML for directory: {directory}")  # Debugging output
         output_path, log = create_project_document(directory)
+        print(f"Generated XML file: {output_path}")  # Debugging output
         with open(output_path, 'r', encoding='utf-8') as f:
             content = f.read()
             text_area.delete("1.0", tk.END)
             text_area.insert(tk.END, content)
             status_label.config(text=f"Generated: {output_path}")
     except Exception as e:
+        print(f"Error during generation: {e}")  # Debugging output
         messagebox.showerror("Error", f"An error occurred: {e}")
 
 def select_directory():
@@ -151,12 +167,15 @@ frame = tk.Frame(root)
 frame.pack(pady=10)
 
 dir_label = tk.Label(frame, text="Select Directory:")
+
 dir_label.pack(side=tk.LEFT, padx=5)
 
 dir_entry = tk.Entry(frame, textvariable=dir_path, width=50)
+
 dir_entry.pack(side=tk.LEFT, padx=5)
 
 browse_button = tk.Button(frame, text="Browse", command=select_directory)
+
 browse_button.pack(side=tk.LEFT, padx=5)
 
 # Buttons for generate and copy
@@ -164,17 +183,21 @@ button_frame = tk.Frame(root)
 button_frame.pack(pady=10)
 
 generate_button = tk.Button(button_frame, text="Generate XML", command=generate_xml)
+
 generate_button.pack(side=tk.LEFT, padx=10)
 
 copy_button = tk.Button(button_frame, text="Copy File", command=copy_file)
+
 copy_button.pack(side=tk.LEFT, padx=10)
 
 # Text area to display output
 text_area = scrolledtext.ScrolledText(root, wrap=tk.WORD, width=90, height=25)
+
 text_area.pack(pady=10)
 
 # Status label
 status_label = tk.Label(root, text="", anchor="w")
+
 status_label.pack(fill=tk.X, padx=5, pady=5)
 
 root.mainloop()
