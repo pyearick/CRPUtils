@@ -3,6 +3,7 @@ import datetime
 import json
 import zipfile
 from pathlib import Path
+import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
@@ -23,6 +24,16 @@ def load_last_directory():
         except Exception:
             return None
     return None
+
+def escape_xml_content(content):
+    """Escape special characters for valid XML."""
+    return (
+        content.replace("&", "&amp;")
+               .replace("<", "&lt;")
+               .replace(">", "&gt;")
+               .replace('"', "&quot;")
+               .replace("'", "&apos;")
+    )
 
 def extract_imports(file_content):
     """Extracts the import statements from a Python file."""
@@ -80,8 +91,12 @@ def create_project_document(directory_path, compress_output=False):
         <modified>{metadata['modified']}</modified>
     </metadata>
     <references>
-        <imports>{', '.join(imports) if imports else 'None'}</imports>
-        <tables>{', '.join(tables) if tables else 'None'}</tables>
+        <imports>
+{"".join(f"            <import>{escape_xml_content(imp)}</import>\n" for imp in imports)}
+        </imports>
+        <tables>
+{"".join(f"            <query>{escape_xml_content(table)}</query>\n" for table in tables)}
+        </tables>
     </references>
     <summary>
         Number of lines: {len(content.splitlines())}
@@ -111,6 +126,13 @@ def create_project_document(directory_path, compress_output=False):
             output_path = zip_path
         except Exception as e:
             raise IOError(f"Failed to compress file {zip_path}: {e}")
+
+    # Validate the generated XML
+    try:
+        ET.parse(output_path)
+        print("XML validation successful.")
+    except ET.ParseError as e:
+        print(f"XML validation failed: {e}")
 
     return output_path
 
