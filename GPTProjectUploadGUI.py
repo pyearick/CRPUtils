@@ -53,7 +53,8 @@ def extract_table_references(file_content):
     return table_references
 
 def create_project_document(directory_path, compress_output=False):
-    """Creates an XML document summarizing Python files in the specified directory."""
+    """Creates an XML document summarizing Python files in the specified directory,
+    now including the entire source code in the XML."""
     excluded_dirs = {".venv", "venv", "__pycache__", ".idea", ".git", ".venvBISQL001", "Archive"}
 
     output = "<documents>"
@@ -83,8 +84,8 @@ def create_project_document(directory_path, compress_output=False):
             }
 
             output += f"""
-<document index=\"{index}\">
-    <source>{relative_path}</source>
+<document index="{index}">
+    <source>{escape_xml_content(relative_path)}</source>
     <metadata>
         <size>{metadata['size']}</size>
         <created>{metadata['created']}</created>
@@ -98,6 +99,9 @@ def create_project_document(directory_path, compress_output=False):
 {"".join(f"            <query>{escape_xml_content(table)}</query>\n" for table in tables)}
         </tables>
     </references>
+    <sourceCode>
+{escape_xml_content(content)}
+    </sourceCode>
     <summary>
         Number of lines: {len(content.splitlines())}
         Number of imports: {len(imports)}
@@ -106,7 +110,7 @@ def create_project_document(directory_path, compress_output=False):
 </document>"""
 
         except Exception as e:
-            output += f"<error>{relative_path}: {e}</error>"
+            output += f"<error>{escape_xml_content(relative_path)}: {escape_xml_content(str(e))}</error>"
 
     output += "</documents>"
 
@@ -135,6 +139,7 @@ def create_project_document(directory_path, compress_output=False):
         print(f"XML validation failed: {e}")
 
     return output_path
+
 
 def select_directory():
     """Open a Tkinter file dialog to select a directory."""
