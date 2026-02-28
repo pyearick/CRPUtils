@@ -19,6 +19,7 @@ class SupplierExclusionGUI:
         self.current_file = None  # Initialize current_file attribute
 
         self.setup_ui()
+        self.setup_sort_bindings()  # Add sorting capability
         self.load_excluded_files()
 
     def setup_ui(self):
@@ -90,6 +91,51 @@ class SupplierExclusionGUI:
 
         ttk.Button(self.root, text="Delete Selected", command=self.delete_exclusion, padding="10").pack(pady=10)
 
+    def setup_sort_bindings(self):
+        # Track sorting state (column, direction)
+        self.sort_column = None
+        self.sort_direction = {}
+
+        # Bind click events on column headers
+        for col in ('FilePath', 'SheetName', 'ExclusionReason', 'ExcludedDate', 'ExcludedBy'):
+            self.tree.heading(col, command=lambda c=col: self.sort_by_column(c))
+            self.sort_direction[col] = 'asc'  # Default sort direction
+
+    def sort_by_column(self, column):
+        # Get all items with their values
+        items = [(self.tree.item(item, 'values'), item) for item in self.tree.get_children('')]
+
+        # Determine the sort key and reverse flag based on column type
+        if column == 'ExcludedDate':
+            # Parse dates for proper chronological sorting
+            items.sort(key=lambda x: datetime.strptime(x[0][3], '%Y-%m-%d %H:%M:%S.%f')
+            if x[0][3] else datetime.min,
+                       reverse=(self.sort_direction[column] == 'desc'))
+        else:
+            # For text columns, use case-insensitive string comparison
+            col_idx = {'FilePath': 0, 'SheetName': 1, 'ExclusionReason': 2, 'ExcludedBy': 4}[column]
+            items.sort(key=lambda x: x[0][col_idx].lower() if x[0][col_idx] else '',
+                       reverse=(self.sort_direction[column] == 'desc'))
+
+        # Toggle sort direction for next click
+        self.sort_direction[column] = 'asc' if self.sort_direction[column] == 'desc' else 'desc'
+
+        # Remove all items
+        for item in self.tree.get_children(''):
+            self.tree.detach(item)
+
+        # Reinsert in sorted order
+        for values, item in items:
+            self.tree.move(item, '', 'end')
+
+        # Update headers to show sort direction
+        for col in self.sort_direction:
+            if col == column:
+                direction = ' ↑' if self.sort_direction[col] == 'asc' else ' ↓'
+                self.tree.heading(col, text=f"{col}{direction}")
+            else:
+                self.tree.heading(col, text=col)
+
     def select_file(self):
         file_path = filedialog.askopenfilename(
             initialdir=self.base_path,
@@ -145,6 +191,7 @@ class SupplierExclusionGUI:
                            ExcludedDate,
                            RTRIM(LTRIM(ExcludedBy)) as ExcludedBy 
                     FROM SupplierExcludedFiles
+                    ORDER BY FilePath, SheetName
                 """)
 
                 for item in self.tree.get_children():
