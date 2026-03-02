@@ -124,7 +124,7 @@ def fetch_all_items(project_filter=None, status_filter=None, priority_filter=Non
 
 
 def fetch_distinct_projects():
-    """Get list of distinct project names."""
+    """Get list of distinct project names from the SQL table."""
     conn = get_connection()
     cursor = conn.cursor()
     cursor.execute("SELECT DISTINCT Project FROM [dbo].[PMA_PunchlistItems] ORDER BY Project")
@@ -132,6 +132,48 @@ def fetch_distinct_projects():
     cursor.close()
     conn.close()
     return projects
+
+
+# Folders to skip when scanning for project folders
+SKIP_FOLDERS = {
+    '.idea', '.git', '.venv', '__pycache__', 'node_modules',
+    'CommitsGH', '.ipynb_checkpoints'
+}
+
+
+def fetch_all_project_folders():
+    """
+    Scan the PycharmProjects directory for ALL project folders,
+    including ones that don't have a punchlist yet.
+    Returns a sorted list of folder names.
+    """
+    try:
+        base = Path(__file__).resolve().parent.parent  # Up from CRPUtils to PycharmProjects
+        folders = []
+        for child in sorted(base.iterdir()):
+            if child.is_dir() and child.name not in SKIP_FOLDERS and not child.name.startswith('.'):
+                folders.append(child.name)
+        return folders
+    except Exception:
+        return []
+
+
+def fetch_merged_project_list():
+    """
+    Merge SQL projects with filesystem folders so the user can
+    add items to projects that don't have a punchlist yet.
+    Existing SQL projects appear first, then new folders marked with (new).
+    """
+    sql_projects = set(fetch_distinct_projects())
+    all_folders = fetch_all_project_folders()
+
+    # Build merged list: SQL projects first (sorted), then new folders
+    merged = sorted(sql_projects)
+    new_folders = [f for f in all_folders if f not in sql_projects]
+    if new_folders:
+        merged.extend(new_folders)
+
+    return merged, new_folders
 
 
 def update_item(item_id, **fields):
@@ -482,6 +524,8 @@ class PunchlistApp:
                           COLORS['btn_warning']).pack(side=tk.LEFT, padx=3)
         self._make_button(row5, "Reopen Item", self.reopen_item,
                           COLORS['btn_primary']).pack(side=tk.LEFT, padx=3)
+        self._make_button(row5, "Generate Prompt", self.generate_prompt,
+                          '#8e44ad').pack(side=tk.LEFT, padx=12)
         self._make_button(row5, "Delete Item", self.delete_item,
                           COLORS['btn_danger']).pack(side=tk.RIGHT, padx=3)
 
@@ -642,11 +686,25 @@ class PunchlistApp:
     # -----------------------------------------------------------------
     # EDIT ACTIONS
     # -----------------------------------------------------------------
+    def _refresh_and_reselect(self, item_id):
+        """Refresh the tree, then re-select and reload the given item."""
+        self.refresh_data()
+        str_id = str(item_id)
+        if str_id in self.item_data:
+            try:
+                self.tree.selection_set(str_id)
+                self.tree.focus(str_id)
+                self.tree.see(str_id)
+                self._populate_detail(self.item_data[str_id])
+            except tk.TclError:
+                pass  # Item may have been filtered out
+
     def save_changes(self):
         if not self.selected_item_id:
             messagebox.showwarning("No Selection", "Select an item first.")
             return
 
+        item_id = self.selected_item_id
         try:
             fields = {
                 'Project': self.detail_project.get(),
@@ -664,9 +722,9 @@ class PunchlistApp:
             if fields['Status'] == 'Completed':
                 fields['CompletedDate'] = datetime.now()
 
-            update_item(self.selected_item_id, **fields)
+            update_item(item_id, **fields)
             self._set_status(f"Saved: {fields['ItemNumber']} - {fields['Title'][:50]}")
-            self.refresh_data()
+            self._refresh_and_reselect(item_id)
 
         except Exception as e:
             messagebox.showerror("Save Error", f"Could not save:\n{e}")
@@ -676,16 +734,17 @@ class PunchlistApp:
             messagebox.showwarning("No Selection", "Select an item first.")
             return
 
-        item = self.item_data.get(str(self.selected_item_id))
+        item_id = self.selected_item_id
+        item = self.item_data.get(str(item_id))
         title = item['Title'][:60] if item else '?'
 
         if messagebox.askyesno("Confirm", f"Mark as completed?\n\n{title}"):
             try:
-                update_item(self.selected_item_id,
+                update_item(item_id,
                             Status='Completed',
                             CompletedDate=datetime.now())
                 self._set_status(f"Completed: {title}")
-                self.refresh_data()
+                self._refresh_and_reselect(item_id)
             except Exception as e:
                 messagebox.showerror("Error", f"Could not update:\n{e}")
 
@@ -694,16 +753,17 @@ class PunchlistApp:
             messagebox.showwarning("No Selection", "Select an item first.")
             return
 
-        item = self.item_data.get(str(self.selected_item_id))
+        item_id = self.selected_item_id
+        item = self.item_data.get(str(item_id))
         title = item['Title'][:60] if item else '?'
 
         if messagebox.askyesno("Confirm", f"Reopen this item?\n\n{title}"):
             try:
-                update_item(self.selected_item_id,
+                update_item(item_id,
                             Status='Open',
                             CompletedDate=None)
                 self._set_status(f"Reopened: {title}")
-                self.refresh_data()
+                self._refresh_and_reselect(item_id)
             except Exception as e:
                 messagebox.showerror("Error", f"Could not update:\n{e}")
 
@@ -736,26 +796,297 @@ class PunchlistApp:
                 messagebox.showerror("Error", f"Could not delete:\n{e}")
 
     # -----------------------------------------------------------------
+    # GENERATE PROMPT
+    # -----------------------------------------------------------------
+    def generate_prompt(self):
+        """
+        Build a context-rich starter prompt for the selected punchlist item.
+        Includes: item detail, related items from same project, cross-project
+        blockers/dependencies, and suggested next steps.
+        Opens in a popup with Copy to Clipboard button.
+        """
+        if not self.selected_item_id:
+            messagebox.showwarning("No Selection", "Select an item first.")
+            return
+
+        item = self.item_data.get(str(self.selected_item_id))
+        if not item:
+            return
+
+        self._set_status("Generating prompt...")
+
+        # Gather context
+        try:
+            all_items = fetch_all_items()
+        except Exception:
+            all_items = []
+
+        project = item['Project']
+        item_num = item['ItemNumber']
+
+        # Same-project siblings (other open items)
+        siblings = [i for i in all_items
+                     if i['Project'] == project
+                     and i['PunchlistItemID'] != item['PunchlistItemID']
+                     and i['Status'] != 'Completed']
+
+        # Cross-project items that reference this item or share blockers
+        blocked_by = item.get('BlockedBy') or ''
+        cross_refs = []
+        for other in all_items:
+            if other['PunchlistItemID'] == item['PunchlistItemID']:
+                continue
+            if other['Status'] == 'Completed':
+                continue
+            # Items that share the same blocker
+            other_blocked = other.get('BlockedBy') or ''
+            if blocked_by and other_blocked and blocked_by.lower() in other_blocked.lower():
+                cross_refs.append(other)
+                continue
+            # Items whose title or description references this project or item
+            other_desc = (other.get('Description') or '').lower()
+            other_title = (other.get('Title') or '').lower()
+            if project.lower() in other_desc or item_num.lower() in other_desc:
+                cross_refs.append(other)
+            elif project.lower() in other_title:
+                cross_refs.append(other)
+
+        # Build the prompt
+        lines = []
+        lines.append(f"PROJECT: {project}")
+        lines.append(f"ITEM: {item_num} — {item['Title']}")
+        lines.append(f"STATUS: {item['Status']}  |  PRIORITY: {item['Priority']}")
+        if item.get('Section'):
+            lines.append(f"SECTION: {item['Section']}")
+        lines.append("")
+
+        # Blockers
+        if item.get('BlockedBy'):
+            lines.append(f"BLOCKED BY: {item['BlockedBy']}")
+            lines.append("")
+        if item.get('Unlocks'):
+            lines.append(f"UNLOCKS: {item['Unlocks']}")
+            lines.append("")
+
+        # Description / context
+        desc = item.get('Description') or ''
+        if desc:
+            lines.append("CONTEXT:")
+            lines.append(desc.strip())
+            lines.append("")
+
+        # Related items in the same project
+        if siblings:
+            lines.append(f"OTHER OPEN ITEMS IN {project} ({len(siblings)}):")
+            for sib in siblings[:10]:
+                pri_tag = f" [{sib['Priority']}]" if sib['Priority'] == 'High' else ""
+                blocked_tag = f" (BLOCKED: {sib['BlockedBy']})" if sib.get('BlockedBy') else ""
+                lines.append(f"  - {sib['ItemNumber']}: {sib['Title'][:70]}{pri_tag}{blocked_tag}")
+            if len(siblings) > 10:
+                lines.append(f"  ... and {len(siblings) - 10} more")
+            lines.append("")
+
+        # Cross-project connections
+        if cross_refs:
+            lines.append("CROSS-PROJECT CONNECTIONS:")
+            seen = set()
+            for ref in cross_refs:
+                key = ref['PunchlistItemID']
+                if key in seen:
+                    continue
+                seen.add(key)
+                lines.append(f"  - [{ref['Project']}] {ref['ItemNumber']}: "
+                             f"{ref['Title'][:60]}")
+                if ref.get('BlockedBy'):
+                    lines.append(f"    Shared blocker: {ref['BlockedBy']}")
+            lines.append("")
+
+        # Instructions for the AI
+        lines.append("=" * 60)
+        lines.append("INSTRUCTIONS:")
+        lines.append("")
+        lines.append(f"I'm working on {item_num} in the {project} project.")
+        lines.append("Please review the context above and help me:")
+        lines.append("")
+
+        if item.get('BlockedBy'):
+            lines.append(f"1. Assess options given the blocker: {item['BlockedBy']}")
+            lines.append("   - Can we work around it? Partial progress possible?")
+            lines.append("   - Should we escalate or follow up?")
+            lines.append("2. Suggest concrete next steps I can take right now.")
+            lines.append("3. If there are related items we should tackle together, flag them.")
+        else:
+            lines.append("1. Break this into concrete implementation steps.")
+            lines.append("2. Identify any risks or dependencies I should be aware of.")
+            lines.append("3. Suggest what to tackle first for maximum progress.")
+            if siblings:
+                lines.append("4. Flag any sibling items that should be worked alongside this one.")
+
+        lines.append("")
+        lines.append("Let's discuss approach before writing any code.")
+
+        prompt_text = '\n'.join(lines)
+
+        # Offer to update the pdoc (project code snapshot) before showing prompt
+        self._offer_pdoc_update(project)
+
+        # Show in popup
+        self._show_prompt_popup(item, prompt_text)
+        self._set_status(f"Prompt generated for {item_num}")
+
+    def _resolve_project_folder(self, project_name):
+        """Resolve the full filesystem path for a project folder."""
+        base = Path(__file__).resolve().parent.parent  # PycharmProjects
+        project_dir = base / project_name
+        if project_dir.exists() and project_dir.is_dir():
+            return project_dir
+        return None
+
+    def _offer_pdoc_update(self, project_name):
+        """
+        Ask the user if they want to refresh the pdoc XML for this project.
+        If yes, calls GPTProjectUploadGUI.create_project_document() against
+        the project folder so the code snapshot is current before starting
+        a new Claude chat.
+        """
+        project_dir = self._resolve_project_folder(project_name)
+        if not project_dir:
+            return  # Folder doesn't exist, skip silently
+
+        # Check if a pdoc file already exists and show its age
+        pdoc_file = project_dir / f"pdoc_{project_name}.xml"
+        age_msg = ""
+        if pdoc_file.exists():
+            mod_time = datetime.fromtimestamp(pdoc_file.stat().st_mtime)
+            age = datetime.now() - mod_time
+            if age.days > 0:
+                age_msg = f"\n\nCurrent pdoc is {age.days} day(s) old ({mod_time.strftime('%Y-%m-%d %H:%M')})."
+            else:
+                hours = age.seconds // 3600
+                age_msg = f"\n\nCurrent pdoc is {hours} hour(s) old ({mod_time.strftime('%Y-%m-%d %H:%M')})."
+        else:
+            age_msg = "\n\nNo pdoc file exists for this project yet."
+
+        if not messagebox.askyesno(
+            "Update Project Code Snapshot",
+            f"Update pdoc_{project_name}.xml before starting?\n"
+            f"This refreshes the code snapshot you upload to Claude.{age_msg}",
+        ):
+            return
+
+        self._set_status(f"Generating pdoc for {project_name}...")
+        self.root.update_idletasks()
+
+        try:
+            # Import the GPT project upload function
+            # It lives in CRPUtils alongside this script
+            from GPTProjectUploadGUI import create_project_document
+
+            output_path = create_project_document(
+                str(project_dir), prefix="", compress_output=False
+            )
+            self._set_status(f"pdoc updated: {output_path}")
+            messagebox.showinfo(
+                "pdoc Updated",
+                f"Code snapshot refreshed:\n\n{output_path}"
+            )
+        except ImportError:
+            messagebox.showwarning(
+                "GPTProjectUploadGUI Not Found",
+                "Could not import GPTProjectUploadGUI.py.\n"
+                "Make sure it exists in the CRPUtils folder."
+            )
+        except Exception as e:
+            messagebox.showerror(
+                "pdoc Error",
+                f"Failed to generate pdoc:\n\n{e}"
+            )
+
+    def _show_prompt_popup(self, item, prompt_text):
+        """Display the generated prompt in a popup with copy button."""
+        popup = tk.Toplevel(self.root)
+        popup.title(f"Prompt — {item['ItemNumber']}: {item['Title'][:50]}")
+        popup.geometry("800x600")
+        popup.configure(bg=COLORS['bg'])
+        popup.transient(self.root)
+
+        # Header
+        header_frame = tk.Frame(popup, bg=COLORS['header_bg'], height=40)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+
+        tk.Label(
+            header_frame,
+            text=f"  Starter Prompt for {item['ItemNumber']}",
+            font=('Segoe UI', 12, 'bold'),
+            bg=COLORS['header_bg'], fg=COLORS['header_fg']
+        ).pack(side=tk.LEFT, padx=10)
+
+        tk.Label(
+            header_frame,
+            text=f"Copy this into a new chat in the {item['Project']} Claude project",
+            font=('Segoe UI', 9, 'italic'),
+            bg=COLORS['header_bg'], fg='#bdc3c7'
+        ).pack(side=tk.RIGHT, padx=10)
+
+        # Text area
+        text_widget = scrolledtext.ScrolledText(
+            popup, font=('Consolas', 10), wrap=tk.WORD, padx=10, pady=10
+        )
+        text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
+        text_widget.insert('1.0', prompt_text)
+
+        # Button bar
+        btn_bar = tk.Frame(popup, bg=COLORS['bg'])
+        btn_bar.pack(fill=tk.X, padx=10, pady=8)
+
+        def copy_to_clipboard():
+            current_text = text_widget.get('1.0', tk.END).strip()
+            popup.clipboard_clear()
+            popup.clipboard_append(current_text)
+            popup.update()
+            copied_label.config(text="Copied!")
+            popup.after(2000, lambda: copied_label.config(text=""))
+
+        self._make_button(btn_bar, "Copy to Clipboard", copy_to_clipboard,
+                          '#8e44ad').pack(side=tk.LEFT, padx=5)
+
+        copied_label = tk.Label(btn_bar, text="", bg=COLORS['bg'],
+                                fg=COLORS['btn_success'],
+                                font=('Segoe UI', 9, 'bold'))
+        copied_label.pack(side=tk.LEFT, padx=5)
+
+        self._make_button(btn_bar, "Close", popup.destroy,
+                          COLORS['btn_primary']).pack(side=tk.RIGHT, padx=5)
+
+    # -----------------------------------------------------------------
     # ADD NEW ITEM
     # -----------------------------------------------------------------
     def add_new_item(self):
         """Open a dialog to add a new punchlist item."""
         dialog = tk.Toplevel(self.root)
         dialog.title("Add New Punchlist Item")
-        dialog.geometry("600x500")
+        dialog.geometry("600x520")
         dialog.configure(bg=COLORS['bg'])
         dialog.transient(self.root)
         dialog.grab_set()
 
-        projects = fetch_distinct_projects()
+        # Get merged project list (SQL + filesystem folders)
+        merged_projects, new_folders = fetch_merged_project_list()
+        new_set = set(new_folders)
 
         # Project
         tk.Label(dialog, text="Project:", bg=COLORS['bg'],
                  font=('Segoe UI', 9)).grid(row=0, column=0, sticky='e', padx=8, pady=4)
-        proj_combo = ttk.Combobox(dialog, values=projects, width=25)
+        proj_combo = ttk.Combobox(dialog, values=merged_projects, width=25)
         proj_combo.grid(row=0, column=1, sticky='w', padx=8, pady=4)
-        if projects:
-            proj_combo.set(projects[0])
+        if merged_projects:
+            proj_combo.set(merged_projects[0])
+
+        # Label that shows "(new punchlist)" when a folder without one is selected
+        new_label = tk.Label(dialog, text="", bg=COLORS['bg'],
+                             font=('Segoe UI', 9, 'italic'), fg=COLORS['btn_success'])
+        new_label.grid(row=0, column=2, sticky='w', padx=4, pady=4)
 
         # Auto-generate item number when project changes
         item_num_var = tk.StringVar()
@@ -767,6 +1098,11 @@ class PunchlistApp:
                     item_num_var.set(get_next_item_number(proj))
                 except Exception:
                     item_num_var.set('')
+                # Show/hide new punchlist indicator
+                if proj in new_set:
+                    new_label.config(text="(new punchlist)")
+                else:
+                    new_label.config(text="")
 
         proj_combo.bind('<<ComboboxSelected>>', update_item_num)
         update_item_num()
