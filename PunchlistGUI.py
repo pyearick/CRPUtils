@@ -282,7 +282,7 @@ class PunchlistApp:
     def __init__(self, root):
         self.root = root
         self.root.title("Punchlist Manager — PMA_PunchlistItems")
-        self.root.geometry("1400x800")
+        self.root.geometry("1400x950")
         self.root.configure(bg=COLORS['bg'])
 
         # Try to set icon if available
@@ -324,6 +324,8 @@ class PunchlistApp:
                           COLORS['btn_success']).pack(side=tk.LEFT, padx=3)
         self._make_button(btn_frame, "Summary", self.show_summary,
                           COLORS['btn_warning']).pack(side=tk.LEFT, padx=3)
+        self._make_button(btn_frame, "Copy Punchlist", self.copy_project_punchlist,
+                          '#8e44ad').pack(side=tk.LEFT, padx=3)
         self._make_button(btn_frame, "+ New Item", self.add_new_item,
                           COLORS['btn_primary']).pack(side=tk.LEFT, padx=3)
 
@@ -510,7 +512,7 @@ class PunchlistApp:
         tk.Label(row4, text="Description:", bg=COLORS['bg'],
                  font=('Segoe UI', 9)).pack(anchor='nw', padx=3)
         self.detail_desc = scrolledtext.ScrolledText(
-            row4, height=4, font=('Consolas', 9), wrap=tk.WORD
+            row4, height=12, font=('Consolas', 8), wrap=tk.WORD
         )
         self.detail_desc.pack(fill=tk.X, padx=3, pady=2)
 
@@ -928,7 +930,17 @@ class PunchlistApp:
         prompt_text = '\n'.join(lines)
 
         # Offer to update the pdoc (project code snapshot) before showing prompt
-        self._offer_pdoc_update(project)
+        pdoc_result = self._offer_pdoc_update(project)
+
+        # If pdoc was updated, append that info to the prompt
+        if pdoc_result:
+            pdoc_note = (
+                f"\n\nNOTE: The project code snapshot has just been refreshed: "
+                f"{pdoc_result}\n"
+                f"I've uploaded this file to the project knowledge. "
+                f"Please review it for the current state of all scripts in {project}."
+            )
+            prompt_text += pdoc_note
 
         # Show in popup
         self._show_prompt_popup(item, prompt_text)
@@ -948,10 +960,12 @@ class PunchlistApp:
         If yes, calls GPTProjectUploadGUI.create_project_document() against
         the project folder so the code snapshot is current before starting
         a new Claude chat.
+
+        Returns the pdoc filename if updated, None otherwise.
         """
         project_dir = self._resolve_project_folder(project_name)
         if not project_dir:
-            return  # Folder doesn't exist, skip silently
+            return None  # Folder doesn't exist, skip silently
 
         # Check if a pdoc file already exists and show its age
         pdoc_file = project_dir / f"pdoc_{project_name}.xml"
@@ -972,7 +986,7 @@ class PunchlistApp:
             f"Update pdoc_{project_name}.xml before starting?\n"
             f"This refreshes the code snapshot you upload to Claude.{age_msg}",
         ):
-            return
+            return None
 
         self._set_status(f"Generating pdoc for {project_name}...")
         self.root.update_idletasks()
@@ -990,17 +1004,20 @@ class PunchlistApp:
                 "pdoc Updated",
                 f"Code snapshot refreshed:\n\n{output_path}"
             )
+            return os.path.basename(output_path)
         except ImportError:
             messagebox.showwarning(
                 "GPTProjectUploadGUI Not Found",
                 "Could not import GPTProjectUploadGUI.py.\n"
                 "Make sure it exists in the CRPUtils folder."
             )
+            return None
         except Exception as e:
             messagebox.showerror(
                 "pdoc Error",
                 f"Failed to generate pdoc:\n\n{e}"
             )
+            return None
 
     def _show_prompt_popup(self, item, prompt_text):
         """Display the generated prompt in a popup with copy button."""
@@ -1197,6 +1214,141 @@ class PunchlistApp:
     # -----------------------------------------------------------------
     # TOOLBAR ACTIONS
     # -----------------------------------------------------------------
+    def copy_project_punchlist(self):
+        """
+        Build a clean text summary of punchlist items for a project
+        (or all projects) and show in a popup with copy-to-clipboard.
+        Uses whatever filters are currently active.
+        """
+        # Get currently displayed items (respects active filters)
+        items = list(self.item_data.values())
+        if not items:
+            messagebox.showinfo("No Items", "No items to copy. Adjust your filters.")
+            return
+
+        # Determine scope label
+        proj_filter = self.project_var.get()
+        status_filter = self.status_var.get()
+        priority_filter = self.priority_var.get()
+
+        scope_parts = []
+        if proj_filter and proj_filter != '(All)':
+            scope_parts.append(proj_filter)
+        else:
+            scope_parts.append("All Projects")
+        if status_filter and status_filter != '(All)':
+            scope_parts.append(f"Status: {status_filter}")
+        if priority_filter and priority_filter != '(All)':
+            scope_parts.append(f"Priority: {priority_filter}")
+        scope_label = ' | '.join(scope_parts)
+
+        # Group by project
+        by_project = {}
+        for item in items:
+            by_project.setdefault(item['Project'], []).append(item)
+
+        # Build text
+        lines = []
+        lines.append(f"PUNCHLIST: {scope_label}")
+        lines.append(f"As of: {datetime.now().strftime('%Y-%m-%d %H:%M')}")
+        lines.append(f"Items: {len(items)}")
+        lines.append("=" * 60)
+
+        for project in sorted(by_project.keys()):
+            proj_items = by_project[project]
+            open_count = sum(1 for i in proj_items if i['Status'] != 'Completed')
+            lines.append(f"\n--- {project} ({open_count} open, "
+                         f"{len(proj_items) - open_count} completed) ---\n")
+
+            for item in proj_items:
+                status_icon = {
+                    'Open': ' ',
+                    'In Progress': '~',
+                    'Blocked': '!',
+                    'Completed': 'x',
+                }.get(item['Status'], ' ')
+
+                pri_tag = f" [{item['Priority']}]" if item['Priority'] == 'High' else ""
+                blocked_tag = ""
+                if item.get('BlockedBy'):
+                    blocked_tag = f"  BLOCKED: {item['BlockedBy']}"
+
+                lines.append(f"[{status_icon}] {item['ItemNumber']}: "
+                             f"{item['Title']}{pri_tag}{blocked_tag}")
+
+                # Include description if present (trimmed)
+                desc = item.get('Description') or ''
+                if desc:
+                    # Show first few lines of description, indented
+                    desc_lines = desc.strip().split('\n')
+                    for dl in desc_lines[:6]:
+                        lines.append(f"    {dl.rstrip()}")
+                    if len(desc_lines) > 6:
+                        lines.append(f"    ... ({len(desc_lines) - 6} more lines)")
+                lines.append("")
+
+        punchlist_text = '\n'.join(lines)
+
+        # Show in popup
+        self._show_punchlist_popup(scope_label, punchlist_text)
+
+    def _show_punchlist_popup(self, scope_label, punchlist_text):
+        """Display the punchlist text in a popup with copy button."""
+        popup = tk.Toplevel(self.root)
+        popup.title(f"Punchlist — {scope_label}")
+        popup.geometry("900x650")
+        popup.configure(bg=COLORS['bg'])
+        popup.transient(self.root)
+
+        # Header
+        header_frame = tk.Frame(popup, bg=COLORS['header_bg'], height=40)
+        header_frame.pack(fill=tk.X)
+        header_frame.pack_propagate(False)
+
+        tk.Label(
+            header_frame,
+            text=f"  {scope_label}",
+            font=('Segoe UI', 12, 'bold'),
+            bg=COLORS['header_bg'], fg=COLORS['header_fg']
+        ).pack(side=tk.LEFT, padx=10)
+
+        tk.Label(
+            header_frame,
+            text="Copy and paste into a Claude chat",
+            font=('Segoe UI', 9, 'italic'),
+            bg=COLORS['header_bg'], fg='#bdc3c7'
+        ).pack(side=tk.RIGHT, padx=10)
+
+        # Text area
+        text_widget = scrolledtext.ScrolledText(
+            popup, font=('Consolas', 10), wrap=tk.WORD, padx=10, pady=10
+        )
+        text_widget.pack(fill=tk.BOTH, expand=True, padx=10, pady=(10, 5))
+        text_widget.insert('1.0', punchlist_text)
+
+        # Button bar
+        btn_bar = tk.Frame(popup, bg=COLORS['bg'])
+        btn_bar.pack(fill=tk.X, padx=10, pady=8)
+
+        def copy_to_clipboard():
+            current_text = text_widget.get('1.0', tk.END).strip()
+            popup.clipboard_clear()
+            popup.clipboard_append(current_text)
+            popup.update()
+            copied_label.config(text="Copied!")
+            popup.after(2000, lambda: copied_label.config(text=""))
+
+        self._make_button(btn_bar, "Copy to Clipboard", copy_to_clipboard,
+                          '#8e44ad').pack(side=tk.LEFT, padx=5)
+
+        copied_label = tk.Label(btn_bar, text="", bg=COLORS['bg'],
+                                fg=COLORS['btn_success'],
+                                font=('Segoe UI', 9, 'bold'))
+        copied_label.pack(side=tk.LEFT, padx=5)
+
+        self._make_button(btn_bar, "Close", popup.destroy,
+                          COLORS['btn_primary']).pack(side=tk.RIGHT, padx=5)
+
     def run_ingest(self):
         """Run the punchlist ingester (markdown -> SQL)."""
         if not messagebox.askyesno(

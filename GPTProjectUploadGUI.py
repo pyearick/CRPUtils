@@ -184,6 +184,9 @@ def main():
         prefix = ask_for_prefix()
         output_file = create_project_document(directory, prefix=prefix, compress_output=False)
         print(f"XML document created at: {output_file}")
+        
+        # Open the folder containing the output file in Windows Explorer
+        os.startfile(directory)
     else:
         print("No directory selected.")
 

@@ -66,7 +66,7 @@ class PunchlistItem:
     """Represents a single open work item parsed from a punchlist."""
 
     def __init__(self, source_project, section, title, body="",
-                 priority=None, status=None, item_id=None):
+                 priority=None, status=None, item_id=None, depends_on=None):
         self.source_project = source_project
         self.section = section
         self.title = title
@@ -74,6 +74,7 @@ class PunchlistItem:
         self.priority = priority
         self.status = status
         self.item_id = item_id
+        self.depends_on = depends_on
 
     def __repr__(self):
         pri = f" [{self.priority}]" if self.priority else ""
@@ -86,6 +87,8 @@ class PunchlistItem:
             lines[0] += f"  (Priority: {self.priority})"
         if self.status:
             lines[0] += f"  (Status: {self.status})"
+        if self.depends_on:
+            lines.append(f"  Depends on: {self.depends_on}")
         if self.body:
             # Trim body to keep prompt size reasonable
             trimmed = self.body.strip()
@@ -135,6 +138,41 @@ def extract_status(text):
     return match.group(1).strip() if match else None
 
 
+def extract_depends_on(text):
+    """
+    Pull dependency from text like '**Depends on:** RIG-002' or
+    '* Depends on: RIG-002'.
+    Handles both bold-markdown and plain bullet formats.
+    """
+    # Bold markdown: **Depends on:** value
+    match = re.search(r'\*\*Depends\s+on:\*\*\s*([^\n]+)', text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    # Plain bullet: * Depends on: value  or  - Depends on: value
+    match = re.search(r'^[*\-]\s*Depends\s+on:\s*([^\n]+)', text, re.IGNORECASE | re.MULTILINE)
+    if match:
+        return match.group(1).strip()
+    return None
+
+
+def strip_metadata_from_body(body):
+    """
+    Remove metadata lines (Status, Priority, Depends on) from the body text
+    so they don't duplicate what's already captured as structured fields.
+    """
+    lines = body.split('\n')
+    cleaned = []
+    for line in lines:
+        stripped = line.strip()
+        # Skip lines that are metadata bullets
+        if re.match(r'^[*\-]\s*\*\*(Status|Priority|Depends\s+on|Added):\*\*', stripped, re.IGNORECASE):
+            continue
+        if re.match(r'^[*\-]\s*(Status|Priority|Depends\s+on|Added):\s', stripped, re.IGNORECASE):
+            continue
+        cleaned.append(line)
+    return '\n'.join(cleaned).strip()
+
+
 def is_completed_section(header_text):
     """Check if a section header indicates completed items."""
     lower = header_text.lower()
@@ -182,14 +220,17 @@ def parse_structured_items(content, source_project):
                     title = item_match.group(2).strip()
                     priority = extract_priority(body)
                     status = extract_status(body)
+                    depends_on = extract_depends_on(body)
+                    clean_body = strip_metadata_from_body(body)
                     items.append(PunchlistItem(
                         source_project=source_project,
                         section=current_section,
                         title=title,
-                        body=body,
+                        body=clean_body,
                         priority=priority,
                         status=status,
-                        item_id=f"ITEM {item_id}"
+                        item_id=f"ITEM {item_id}",
+                        depends_on=depends_on
                     ))
             else:
                 # It's a section header
@@ -228,8 +269,10 @@ def parse_bullet_items(content, source_project):
         bullet_match = re.match(r'^-\s+(.+)', line)
         if bullet_match:
             bullet_text = bullet_match.group(1).strip()
-            # Skip metadata bullets (Status, Priority, Added)
-            if re.match(r'\*\*(Status|Priority|Added):\*\*', bullet_text):
+            # Skip metadata bullets (Status, Priority, Added, Depends on)
+            if re.match(r'\*\*(Status|Priority|Added|Depends\s+on):\*\*', bullet_text):
+                continue
+            if re.match(r'(Status|Priority|Added|Depends\s+on):\s', bullet_text, re.IGNORECASE):
                 continue
 
             priority = extract_priority(bullet_text)
@@ -251,16 +294,15 @@ def parse_bullet_items(content, source_project):
 
 def parse_pl_blocks(content, source_project):
     """
-    Parse PL-NNN style blocks (PMA format).
-    Each ## PL-NNN: Title is one item. Everything until the next ## PL-NNN
-    or --- separator or end-of-file is the item's body.
-    Also captures free-form items separated by --- that lack PL-NNN headers.
+    Parse PREFIX-NNN style blocks (PMA, CH, LS, BDH, etc.).
+    Each ## PREFIX-NNN: Title (with optional emoji) is one item.
+    Everything until the next header or --- separator is the item's body.
+    Also captures free-form items separated by --- that lack headers.
     """
     items = []
 
-    # Split on ## PL-NNN: headers, keeping the header text
-    # First, find all PL-block boundaries
-    pl_pattern = r'^##\s+PL-(\d+):\s*(.+)'
+    # Match any PREFIX-NNN: header (## or ###, optional emoji)
+    pl_pattern = r'^#{2,3}\s+(?:[🔲⬜🔄🚫]\s*)?([A-Z]+-\d+):\s*(.+)'
     separator = r'^---\s*$'
 
     blocks = []
@@ -275,7 +317,7 @@ def parse_pl_blocks(content, source_project):
             if current_block['title'] or current_block['lines']:
                 blocks.append(current_block)
             current_block = {
-                'id': f"PL-{pl_match.group(1)}",
+                'id': pl_match.group(1),
                 'title': pl_match.group(2).strip(),
                 'lines': []
             }
@@ -315,15 +357,18 @@ def parse_pl_blocks(content, source_project):
 
         priority = extract_priority(body)
         status = extract_status(body)
+        depends_on = extract_depends_on(body)
+        clean_body = strip_metadata_from_body(body)
 
         items.append(PunchlistItem(
             source_project=source_project,
             section="Punch List",
             title=title,
-            body=body,
+            body=clean_body,
             priority=priority,
             status=status,
-            item_id=block['id']
+            item_id=block['id'],
+            depends_on=depends_on
         ))
 
     return items
@@ -352,7 +397,7 @@ def parse_punchlist_file(filepath):
 
     # Detect format
     has_item_blocks = bool(re.search(r'##\s*[🔲⬜]\s*ITEM\s*\d+:', content))
-    has_pl_blocks = bool(re.search(r'##\s+PL-\d+:', content))
+    has_pl_blocks = bool(re.search(r'#{2,3}\s+(?:[🔲⬜]\s*)?[A-Z]+-\d+:', content))
 
     if has_item_blocks:
         items = parse_structured_items(content, source_project)

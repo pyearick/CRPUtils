@@ -134,7 +134,7 @@ def compute_content_hash(item):
     Generate a hash of the item's content so we can detect changes
     without relying solely on title matching.
     """
-    content = f"{item.title}|{item.body}|{item.section}"
+    content = f"{item.title}|{item.body}|{item.section}|{getattr(item, 'depends_on', '') or ''}"
     return hashlib.sha256(content.encode('utf-8', errors='replace')).hexdigest()[:32]
 
 
@@ -241,6 +241,7 @@ def generate_item_number(project, index):
         'BigDawgHunt': 'BDH',
         'LostSales': 'LS',
         'PMAssistant': 'PMA',
+        'CustomerHealth': 'CH',
     }
 
     # Try known prefixes, fall back to first 3 chars uppercase
@@ -272,6 +273,7 @@ def upsert_items(items_by_project):
             'BigDawgHunt': 'BDH',
             'LostSales': 'LS',
             'PMAssistant': 'PMA',
+            'CustomerHealth': 'CH',
         }
         prefix = prefix_map.get(project, project[:3].upper())
 
@@ -293,7 +295,9 @@ def upsert_items(items_by_project):
                 content_hash = compute_content_hash(item)
                 priority = normalize_priority(item.priority)
                 status = normalize_status(item.status)
-                blocked_by = detect_blocked_by(item.body)
+                # Prefer the explicit depends_on field from markdown metadata;
+                # fall back to regex scan of body text for older items
+                blocked_by = getattr(item, 'depends_on', None) or detect_blocked_by(item.body)
                 unlocks = detect_unlocks(item.body)
                 description = item.body.strip() if item.body else None
 
@@ -442,6 +446,7 @@ def export_markdown(output_dir=None):
         'BigDawgHunt': 'BDH',
         'LostSales': 'LS',
         'PMAssistant': 'PMA',
+        'CustomerHealth': 'CH',
     }
 
     files_written = {}
@@ -480,7 +485,7 @@ def export_markdown(output_dir=None):
             lines.append(f"- **Priority:** {item['Priority']}")
 
             if item['BlockedBy']:
-                lines.append(f"- **Blocked By:** {item['BlockedBy']}")
+                lines.append(f"- **Depends on:** {item['BlockedBy']}")
             if item['Unlocks']:
                 lines.append(f"- **Unlocks:** {item['Unlocks']}")
 

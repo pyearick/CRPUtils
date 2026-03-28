@@ -5,6 +5,7 @@ from pathlib import Path
 import pandas as pd
 from datetime import datetime
 import os
+import re
 import subprocess  # For opening Excel files
 
 
@@ -30,6 +31,7 @@ class SupplierExclusionGUI:
         self.open_excel_button = ttk.Button(select_frame, text="Open in Excel", command=self.open_in_excel,
                                             state=tk.DISABLED)
         self.open_excel_button.pack(side=tk.LEFT, padx=5)
+        ttk.Button(select_frame, text="Check Clipboard OEANs", command=self.check_clipboard_oeans).pack(side=tk.LEFT, padx=5)
         ttk.Button(select_frame, text="Quit", command=self.root.quit).pack(side=tk.RIGHT)
 
         # Sheet selection
@@ -279,6 +281,178 @@ class SupplierExclusionGUI:
 
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to delete exclusion: {str(e)}")
+
+    # ---- OEAN normalization (mirrors csvCleaner.py / pipeline logic) ----
+
+    @staticmethod
+    def normalize_oean(oean):
+        """Normalize an OEAN for Motors lookup — strip, remove hyphens and spaces."""
+        return oean.strip().replace('-', '').replace(' ', '')
+
+    @staticmethod
+    def split_oeans(text):
+        """Split raw text into individual OEANs — same delimiters as csvCleaner.py."""
+        return re.split(r'[;,\\\s]+', text)
+
+    def check_clipboard_oeans(self):
+        """Read OEANs from clipboard, normalize, and check against Motor_OE_PartTracking."""
+        # --- Get clipboard text ---
+        try:
+            raw_text = self.root.clipboard_get()
+        except tk.TclError:
+            messagebox.showwarning("Clipboard Empty", "Nothing on the clipboard to check.")
+            return
+
+        if not raw_text or not raw_text.strip():
+            messagebox.showwarning("Clipboard Empty", "Clipboard text is empty.")
+            return
+
+        # --- Split and normalize ---
+        raw_tokens = self.split_oeans(raw_text)
+        # Dedupe while preserving original form for display
+        seen = {}  # normalized -> raw
+        for token in raw_tokens:
+            token = token.strip()
+            if not token or token.lower() == 'nan':
+                continue
+            normalized = self.normalize_oean(token)
+            if normalized and normalized not in seen:
+                seen[normalized] = token
+
+        if not seen:
+            messagebox.showinfo("No OEANs", "No valid OEANs found after parsing clipboard text.")
+            return
+
+        # --- Query Motor_OE_PartTracking ---
+        try:
+            conn = pyodbc.connect(self.db_conn)
+            cursor = conn.cursor()
+
+            # Build parameterized IN clause (batch if needed for large lists)
+            normalized_list = list(seen.keys())
+            matched = {}  # normalized -> (PartNumber, CleanPartNumber, Make, CurrentDescription)
+            batch_size = 500
+
+            for i in range(0, len(normalized_list), batch_size):
+                batch = normalized_list[i:i + batch_size]
+                placeholders = ','.join(['?'] * len(batch))
+                query = f"""
+                    SELECT PartNumber, CleanPartNumber, Make, CurrentDescription, IsActive
+                    FROM [CRPAF].[dbo].[Motor_OE_PartTracking]
+                    WHERE CleanPartNumber IN ({placeholders})
+                """
+                cursor.execute(query, batch)
+                for row in cursor.fetchall():
+                    matched[row.CleanPartNumber] = {
+                        'PartNumber': row.PartNumber,
+                        'CleanPartNumber': row.CleanPartNumber,
+                        'Make': row.Make or '',
+                        'Description': row.CurrentDescription or '',
+                        'IsActive': row.IsActive
+                    }
+
+            conn.close()
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Failed to query Motor_OE_PartTracking:\n{e}")
+            return
+
+        # --- Classify results ---
+        matched_pairs = []   # (raw, normalized, db_info)
+        unmatched_pairs = [] # (raw, normalized)
+
+        for normalized, raw in seen.items():
+            if normalized in matched:
+                matched_pairs.append((raw, normalized, matched[normalized]))
+            else:
+                unmatched_pairs.append((raw, normalized))
+
+        # --- Show results in popup ---
+        self._show_oean_results(seen, matched_pairs, unmatched_pairs)
+
+    def _show_oean_results(self, all_oeans, matched_pairs, unmatched_pairs):
+        """Display OEAN check results in a popup window."""
+        win = tk.Toplevel(self.root)
+        win.title("OEAN Check Results — Motor_OE_PartTracking")
+        win.geometry("950x550")
+
+        total = len(all_oeans)
+        hit_count = len(matched_pairs)
+        miss_count = len(unmatched_pairs)
+
+        # --- Summary bar ---
+        summary_frame = ttk.Frame(win, padding="10")
+        summary_frame.pack(fill=tk.X)
+
+        verdict_color = "dark green" if hit_count > 0 else "red"
+        verdict_text = (f"Checked {total} unique OEANs  —  "
+                        f"{hit_count} matched Motors OE, {miss_count} did not")
+
+        verdict_label = tk.Label(summary_frame, text=verdict_text,
+                                 font=("Segoe UI", 11, "bold"), fg=verdict_color)
+        verdict_label.pack(anchor=tk.W)
+
+        if hit_count == 0:
+            safe_label = tk.Label(summary_frame,
+                                  text="✓  Zero Motors matches — safe to exclude (no OEs would flow to SQL)",
+                                  font=("Segoe UI", 10), fg="gray")
+            safe_label.pack(anchor=tk.W, pady=(2, 0))
+        else:
+            warn_label = tk.Label(summary_frame,
+                                  text="⚠  Some OEANs match Motors — excluding this file will drop them from SQL",
+                                  font=("Segoe UI", 10), fg="dark orange")
+            warn_label.pack(anchor=tk.W, pady=(2, 0))
+
+        # --- Notebook with tabs ---
+        nb = ttk.Notebook(win)
+        nb.pack(fill=tk.BOTH, expand=True, padx=10, pady=(5, 10))
+
+        # -- Matched tab --
+        match_frame = ttk.Frame(nb)
+        nb.add(match_frame, text=f"  Matched ({hit_count})  ")
+
+        match_cols = ('Raw', 'Normalized', 'PartNumber', 'Make', 'Description', 'Active')
+        match_tree = ttk.Treeview(match_frame, columns=match_cols, show='headings', height=15)
+        match_tree.column('Raw', width=120)
+        match_tree.column('Normalized', width=120)
+        match_tree.column('PartNumber', width=120)
+        match_tree.column('Make', width=100)
+        match_tree.column('Description', width=300)
+        match_tree.column('Active', width=55)
+        for col in match_cols:
+            match_tree.heading(col, text=col, anchor=tk.W)
+
+        match_scroll = ttk.Scrollbar(match_frame, orient=tk.VERTICAL, command=match_tree.yview)
+        match_tree.configure(yscrollcommand=match_scroll.set)
+        match_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        match_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        for raw, normalized, info in matched_pairs:
+            match_tree.insert('', 'end', values=(
+                raw, normalized, info['PartNumber'], info['Make'],
+                info['Description'], 'Yes' if info['IsActive'] else 'No'
+            ))
+
+        # -- Unmatched tab --
+        nomatch_frame = ttk.Frame(nb)
+        nb.add(nomatch_frame, text=f"  Not in Motors ({miss_count})  ")
+
+        nomatch_cols = ('Raw', 'Normalized')
+        nomatch_tree = ttk.Treeview(nomatch_frame, columns=nomatch_cols, show='headings', height=15)
+        nomatch_tree.column('Raw', width=250)
+        nomatch_tree.column('Normalized', width=250)
+        for col in nomatch_cols:
+            nomatch_tree.heading(col, text=col, anchor=tk.W)
+
+        nomatch_scroll = ttk.Scrollbar(nomatch_frame, orient=tk.VERTICAL, command=nomatch_tree.yview)
+        nomatch_tree.configure(yscrollcommand=nomatch_scroll.set)
+        nomatch_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        nomatch_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+
+        for raw, normalized in unmatched_pairs:
+            nomatch_tree.insert('', 'end', values=(raw, normalized))
+
+        # -- Close button --
+        ttk.Button(win, text="Close", command=win.destroy).pack(pady=5)
 
     def run(self):
         self.root.mainloop()
