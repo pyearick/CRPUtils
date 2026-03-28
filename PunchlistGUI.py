@@ -388,7 +388,7 @@ class PunchlistApp:
         tree_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 5))
 
         columns = ('project', 'item_num', 'title', 'status', 'priority',
-                   'section', 'blocked_by')
+                   'created', 'modified', 'blocked_by')
         self.tree = ttk.Treeview(
             tree_frame, columns=columns, show='headings',
             selectmode='browse', height=15
@@ -398,11 +398,12 @@ class PunchlistApp:
         col_config = {
             'project': ('Project', 120),
             'item_num': ('Item #', 80),
-            'title': ('Title', 420),
+            'title': ('Title', 380),
             'status': ('Status', 90),
             'priority': ('Priority', 75),
-            'section': ('Section', 160),
-            'blocked_by': ('Blocked By', 200),
+            'created': ('Created', 100),
+            'modified': ('Modified', 100),
+            'blocked_by': ('Blocked By', 160),
         }
         for col, (heading, width) in col_config.items():
             self.tree.heading(col, text=heading,
@@ -505,6 +506,31 @@ class PunchlistApp:
         self.detail_unlocks = tk.Entry(row3, width=40, font=('Segoe UI', 9))
         self.detail_unlocks.pack(side=tk.LEFT, padx=3)
 
+        # Row 3b: Date info (read-only)
+        row3b = tk.Frame(detail_outer, bg=COLORS['bg'])
+        row3b.pack(fill=tk.X, pady=2)
+
+        tk.Label(row3b, text="Created:", bg=COLORS['bg'],
+                 font=('Segoe UI', 9)).pack(side=tk.LEFT, padx=3)
+        self.detail_created = tk.Label(row3b, text="", bg=COLORS['bg'],
+                                       font=('Segoe UI', 9, 'italic'),
+                                       fg='#555555')
+        self.detail_created.pack(side=tk.LEFT, padx=(0, 15))
+
+        tk.Label(row3b, text="Modified:", bg=COLORS['bg'],
+                 font=('Segoe UI', 9)).pack(side=tk.LEFT, padx=3)
+        self.detail_modified = tk.Label(row3b, text="", bg=COLORS['bg'],
+                                        font=('Segoe UI', 9, 'italic'),
+                                        fg='#555555')
+        self.detail_modified.pack(side=tk.LEFT, padx=(0, 15))
+
+        tk.Label(row3b, text="Completed:", bg=COLORS['bg'],
+                 font=('Segoe UI', 9)).pack(side=tk.LEFT, padx=3)
+        self.detail_completed = tk.Label(row3b, text="", bg=COLORS['bg'],
+                                         font=('Segoe UI', 9, 'italic'),
+                                         fg='#555555')
+        self.detail_completed.pack(side=tk.LEFT, padx=(0, 15))
+
         # Row 4: Description (multiline)
         row4 = tk.Frame(detail_outer, bg=COLORS['bg'])
         row4.pack(fill=tk.X, pady=2)
@@ -562,6 +588,17 @@ class PunchlistApp:
         self.status_bar.config(text=msg)
         self.root.update_idletasks()
 
+    def _fmt_date(self, dt_val, include_year=False):
+        """Format a datetime for display. Returns '' if None."""
+        if dt_val is None:
+            return ''
+        try:
+            if include_year:
+                return dt_val.strftime('%m/%d/%Y %H:%M')
+            return dt_val.strftime('%m/%d %H:%M')
+        except (AttributeError, ValueError):
+            return str(dt_val)[:16]
+
     def _clear_detail(self):
         self.selected_item_id = None
         self.detail_project.set('')
@@ -573,6 +610,9 @@ class PunchlistApp:
         self.detail_blocked.delete(0, tk.END)
         self.detail_unlocks.delete(0, tk.END)
         self.detail_desc.delete('1.0', tk.END)
+        self.detail_created.config(text="")
+        self.detail_modified.config(text="")
+        self.detail_completed.config(text="")
 
     def _populate_detail(self, item):
         self._clear_detail()
@@ -590,6 +630,12 @@ class PunchlistApp:
         self.detail_blocked.insert(0, item['BlockedBy'] or '')
         self.detail_unlocks.insert(0, item['Unlocks'] or '')
         self.detail_desc.insert('1.0', item['Description'] or '')
+        self.detail_created.config(
+            text=self._fmt_date(item.get('CreatedDate'), include_year=True))
+        self.detail_modified.config(
+            text=self._fmt_date(item.get('LastModifiedDate'), include_year=True))
+        self.detail_completed.config(
+            text=self._fmt_date(item.get('CompletedDate'), include_year=True) or '—')
 
     def _sort_column(self, col):
         """Sort treeview by column (toggle asc/desc)."""
@@ -653,7 +699,8 @@ class PunchlistApp:
                 item['Title'][:80],
                 item['Status'],
                 item['Priority'],
-                item['Section'] or '',
+                self._fmt_date(item.get('CreatedDate')),
+                self._fmt_date(item.get('LastModifiedDate')),
                 item['BlockedBy'] or ''
             ), tags=tuple(tags))
 
