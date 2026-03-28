@@ -2,17 +2,18 @@ import os
 import datetime
 import json
 import zipfile
-from pathlib import Path
 import xml.etree.ElementTree as ET
 import tkinter as tk
 from tkinter import filedialog, messagebox
 
 LAST_DIRECTORY_FILE = os.path.expanduser("~/.last_directory.json")
 
+
 def save_last_directory(directory):
     """Save the last visited directory to a file."""
     with open(LAST_DIRECTORY_FILE, 'w') as f:
         json.dump({"last_directory": directory}, f)
+
 
 def load_last_directory():
     """Load the last visited directory from a file, if it exists."""
@@ -25,15 +26,17 @@ def load_last_directory():
             return None
     return None
 
+
 def escape_xml_content(content):
     """Escape special characters for valid XML."""
     return (
         content.replace("&", "&amp;")
-               .replace("<", "&lt;")
-               .replace(">", "&gt;")
-               .replace('"', "&quot;")
-               .replace("'", "&apos;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
     )
+
 
 def extract_imports(file_content):
     """Extracts the import statements from a Python file."""
@@ -44,6 +47,7 @@ def extract_imports(file_content):
             imports.append(line)
     return imports
 
+
 def extract_table_references(file_content):
     """Extracts potential table references from a Python file."""
     table_references = []
@@ -52,10 +56,11 @@ def extract_table_references(file_content):
             table_references.append(line.strip())
     return table_references
 
+
 def create_project_document(directory_path, prefix="", compress_output=False):
     """Creates an XML document summarizing script files in the specified directory,
     supporting optional prefix filtering."""
-    excluded_dirs = {".venv", "venv", "__pycache__", ".idea", ".git", ".venvBISQL001"}
+    excluded_dirs = {".venv", "venv", "__pycache__", ".idea", ".git", ".venvBISQL001", "Archive"}
 
     output = "<documents>"
 
@@ -83,14 +88,10 @@ def create_project_document(directory_path, prefix="", compress_output=False):
                 imports = []
                 tables = []
 
-            # Check if file is in an Archive subdirectory
-            is_archived = "Archive" in Path(relative_path).parts
-
             metadata = {
                 "size": os.path.getsize(file_path),
                 "created": datetime.datetime.fromtimestamp(os.path.getctime(file_path)).isoformat(),
                 "modified": datetime.datetime.fromtimestamp(os.path.getmtime(file_path)).isoformat(),
-                "archived": is_archived,
             }
 
             output += f"""
@@ -100,7 +101,6 @@ def create_project_document(directory_path, prefix="", compress_output=False):
         <size>{metadata['size']}</size>
         <created>{metadata['created']}</created>
         <modified>{metadata['modified']}</modified>
-        <archived>{str(metadata['archived']).lower()}</archived>
     </metadata>
     <references>
         <imports>
@@ -129,7 +129,7 @@ def create_project_document(directory_path, prefix="", compress_output=False):
     folder_name = os.path.basename(directory_path)
     output_filename = f"pdoc_{folder_name}.xml"
     output_path = os.path.join(directory_path, output_filename)
-    
+
     try:
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(output)
@@ -155,6 +155,7 @@ def create_project_document(directory_path, prefix="", compress_output=False):
 
     return output_path
 
+
 def select_directory():
     """Open a Tkinter file dialog to select a directory."""
     root = tk.Tk()
@@ -164,6 +165,7 @@ def select_directory():
     if selected_dir:
         save_last_directory(selected_dir)
     return selected_dir
+
 
 def ask_for_prefix():
     """Prompt the user to enter a prefix for filtering files."""
@@ -178,17 +180,19 @@ def ask_for_prefix():
         prefix = ""  # Treat cancel as empty prefix (include everything)
     return prefix.strip()
 
+
 def main():
     directory = select_directory()
     if directory:
         prefix = ask_for_prefix()
         output_file = create_project_document(directory, prefix=prefix, compress_output=False)
         print(f"XML document created at: {output_file}")
-        
+
         # Open the folder containing the output file in Windows Explorer
         os.startfile(directory)
     else:
         print("No directory selected.")
+
 
 if __name__ == "__main__":
     main()
