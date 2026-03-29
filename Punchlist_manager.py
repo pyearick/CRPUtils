@@ -26,6 +26,7 @@ import re
 import logging
 import pyodbc
 import hashlib
+import shutil
 from pathlib import Path
 from datetime import datetime
 
@@ -674,6 +675,68 @@ def run_export(output_dir=None):
     return files
 
 
+def run_collect(base_dir=None):
+    """
+    Collect entry point.
+    Ingests markdown into SQL first (so the table is current), then
+    finds all *_Punchlist.md files across sibling project folders and
+    copies them flat into a PunchlistReview folder at the PycharmProjects root.
+    Clears the folder first so the overseer agent always sees a fresh snapshot.
+    """
+    if base_dir is None:
+        base_dir = Path(__file__).resolve().parent
+
+    projects_root = Path(base_dir).resolve().parent
+    review_dir = projects_root / "PunchlistReview"
+
+    logger.info("=" * 60)
+    logger.info("PUNCHLIST MANAGER - Collect Starting")
+    logger.info(f"Source root: {projects_root}")
+    logger.info(f"Destination: {review_dir}")
+    logger.info("=" * 60)
+
+    # Step 1: Ingest markdown -> SQL so the table is current
+    print("Running ingest first to sync SQL table...\n")
+    ingest_result = run_ingest(base_dir)
+    if ingest_result:
+        print(f"\nIngest: {ingest_result['inserted']} new, "
+              f"{ingest_result['updated']} updated, "
+              f"{ingest_result['unchanged']} unchanged, "
+              f"{ingest_result['errors']} errors\n")
+    print("-" * 60)
+
+    # Step 2: Find all punchlist files
+    punchlist_files = find_punchlist_files(base_dir)
+    if not punchlist_files:
+        logger.warning("No punchlist files found.")
+        print("\nNo *_Punchlist.md files found.")
+        return []
+
+    # Create/clear the review folder
+    review_dir.mkdir(exist_ok=True)
+    for old_file in review_dir.glob("*_Punchlist.md"):
+        old_file.unlink()
+        logger.info(f"  Cleared old: {old_file.name}")
+
+    # Copy files flat into review folder
+    copied = []
+    for src in punchlist_files:
+        dest = review_dir / src.name
+        if dest.exists():
+            logger.warning(f"  NAME COLLISION: {src.name} — skipping duplicate "
+                           f"(kept copy from {copied[-1] if copied else 'unknown'})")
+            continue
+        shutil.copy2(src, dest)
+        copied.append(str(dest))
+        logger.info(f"  Copied: {src} -> {dest}")
+
+    print(f"\nCollected {len(copied)} punchlist file(s) to {review_dir}:")
+    for f in copied:
+        print(f"  {Path(f).name}")
+
+    return copied
+
+
 # =============================================================================
 # STANDALONE EXECUTION
 # =============================================================================
@@ -720,9 +783,13 @@ if __name__ == "__main__":
             print("Now exporting clean markdown files...\n")
             run_export()
 
+        elif mode == 'collect':
+            print("Mode: COLLECT (copy punchlists to PunchlistReview)\n")
+            run_collect()
+
         else:
             print(f"Unknown mode: {mode}")
-            print("Usage: python punchlist_manager.py [ingest|export|summary|both]")
+            print("Usage: python punchlist_manager.py [ingest|export|summary|both|collect]")
             sys.exit(1)
 
         print(f"\nLog: {LOG_FILE}")

@@ -115,7 +115,7 @@ def find_punchlist_files(base_dir):
                 found.append(child)
             continue
         # Skip hidden folders and common non-project dirs
-        if child.name.startswith('.') or child.name in ('__pycache__', '.venv', 'node_modules'):
+        if child.name.startswith('.') or child.name in ('__pycache__', '.venv', 'node_modules', 'PunchlistReview'):
             continue
         # Glob for *_punchlist.md (case-insensitive via manual check)
         for f in child.iterdir():
