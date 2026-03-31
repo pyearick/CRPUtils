@@ -57,6 +57,13 @@ def extract_table_references(file_content):
     return table_references
 
 
+def add_line_numbers(content):
+    """Prefix each line with its line number for easier reference."""
+    lines = content.splitlines()
+    width = len(str(len(lines)))
+    return '\n'.join(f"{i:{width}d} | {line}" for i, line in enumerate(lines, 1))
+
+
 def create_project_document(directory_path, prefix="", compress_output=False):
     """Creates an XML document summarizing script files in the specified directory,
     supporting optional prefix filtering."""
@@ -111,7 +118,7 @@ def create_project_document(directory_path, prefix="", compress_output=False):
         </tables>
     </references>
     <sourceCode>
-{escape_xml_content(content)}
+{escape_xml_content(add_line_numbers(content))}
     </sourceCode>
     <summary>
         Number of lines: {len(content.splitlines())}
