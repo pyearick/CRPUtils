@@ -341,14 +341,9 @@ def parse_pl_blocks(content, source_project):
         if not body and not block['title']:
             continue
 
-        # For unnamed blocks (after ---), derive title from first meaningful line
+        # In PREFIX-NNN files, every real item has a header.
+        # Unnamed blocks are export boilerplate or description fragments — skip them.
         title = block['title']
-        if not title:
-            for bline in block['lines']:
-                bline = bline.strip()
-                if bline and not bline.startswith('#'):
-                    title = bline[:100]
-                    break
         if not title:
             continue
 
