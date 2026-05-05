@@ -123,6 +123,9 @@ class Disconnect:
     projects: List[str]
     summary: str           # human-readable description
     correction_note: str   # text to inject into the prompt
+    claiming_project: str = ''  # the project that made the claim
+                                # (only this project gets the note
+                                #  for 'table_exists' disconnects)
 
 
 @dataclass
@@ -379,19 +382,36 @@ def _extract_pending_tables(
     """
     pending = []
     # Look for "blocked pending <table>" or "<table> not yet available"
+    # Distance limits prevent matching across unrelated clauses
     patterns = [
-        re.compile(r'(?:blocked|pending)\s+.*?`([A-Za-z]\w+)`', re.IGNORECASE),
-        re.compile(r'`([A-Za-z]\w+)`\s+.*?(?:not yet|pending|unavailable)',
+        re.compile(r'(?:blocked|pending)\s+.{0,40}`([A-Za-z]\w+)`',
+                   re.IGNORECASE),
+        re.compile(r'`([A-Za-z]\w+)`\s+.{0,30}(?:not yet available|'
+                   r'not yet accessible|pending availability|'
+                   r'unavailable|does not exist)',
                    re.IGNORECASE),
         re.compile(r'pending\s+(\w+)\s+table', re.IGNORECASE),
-        re.compile(r'(\w+)\s+table\s+.*?(?:pending|requested|promised)',
+        re.compile(r'(\w+)\s+table\s+.{0,30}(?:pending|requested|'
+                   r'promised)\b',
                    re.IGNORECASE),
     ]
+
+    # Words between a keyword and table name that indicate the table
+    # is a write destination, not a blocked resource
+    destination_words = re.compile(
+        r'(?:logged|written|saved|inserted|recorded|stored|'
+        r'pushed|sent|posted)\s+(?:to|into|in)\b',
+        re.IGNORECASE
+    )
 
     for pattern in patterns:
         for match in pattern.finditer(text):
             table = match.group(1)
             if len(table) < 3:
+                continue
+            # Check if the gap text suggests the table is a destination
+            gap = match.group(0)
+            if destination_words.search(gap):
                 continue
             ctx = _find_sentence_around(text, match.group(0))
             pending.append(TableClaim(
@@ -551,9 +571,13 @@ def _find_table_existence_contradictions(
                     correction_note=(
                         f"Your previous synopsis indicated `{table}` is "
                         f"pending or blocked. However, {example_str}. "
-                        f"Please verify whether this blocker is still "
-                        f"active and update accordingly."
-                    )
+                        f"This resource exists and is in active use. "
+                        f"Please update the synopsis to remove the "
+                        f"blocker and note its availability. If this "
+                        f"project should integrate it, add a punchlist "
+                        f"item for that work."
+                    ),
+                    claiming_project=project
                 ))
 
     return disconnects
@@ -746,10 +770,16 @@ def build_project_notes(
     notes = defaultdict(list)
 
     for disc in disconnects:
-        for project in disc.projects:
-            # Only add the note if it's relevant to this project
-            if project in disc.correction_note:
-                notes[project].append(disc.correction_note)
+        if disc.claiming_project:
+            # Contradiction notes only go to the project that
+            # made the claim — not to the evidence projects
+            notes[disc.claiming_project].append(disc.correction_note)
+        else:
+            # Other disconnect types (stale refs, consolidation,
+            # shared table info) go to all involved projects
+            for project in disc.projects:
+                if project in disc.correction_note:
+                    notes[project].append(disc.correction_note)
 
     # Deduplicate notes per project
     for project in notes:
