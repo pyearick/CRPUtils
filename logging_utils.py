@@ -31,6 +31,7 @@ Usage:
 import logging
 import os
 from datetime import datetime, timedelta
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 from contextlib import contextmanager
 
@@ -52,13 +53,16 @@ def setup_logging(
     line_buffered: bool = True,
     include_console: bool = True,
     format_string: str = DEFAULT_FORMAT,
+    max_bytes: int = 50 * 1024 * 1024,
+    backup_count: int = 3,
 ) -> logging.Logger:
     """
     Set up standardized logging for BDH scripts.
-    
+
     Creates a logger that writes to both file and console (optional).
     File output is line-buffered by default so logs appear immediately.
-    
+    Log files rotate at max_bytes with backup_count old files retained.
+
     Args:
         log_name: Name for the log file (without .log extension)
                   e.g., 'BDH_06_ShowMeTheParts' -> C:\\Logs\\BDH_06_ShowMeTheParts.log
@@ -67,25 +71,30 @@ def setup_logging(
         line_buffered: If True, flush after each line (default: True)
         include_console: If True, also log to console (default: True)
         format_string: Log message format
-        
+        max_bytes: Rotate log file at this size in bytes (default: 50 MB)
+        backup_count: Number of rotated log files to keep (default: 3)
+
     Returns:
         Configured logger instance
-        
+
     Example:
         logger = setup_logging('BDH_07_MarketValidation')
         logger.info("Starting validation...")
     """
     # Ensure log directory exists
     os.makedirs(log_dir, exist_ok=True)
-    
+
     # Build log file path (no date suffix per Pat's preference)
     log_path = os.path.join(log_dir, f"{log_name}.log")
-    
+
     # Create formatter
     formatter = logging.Formatter(format_string)
-    
-    # Create file handler
-    file_handler = logging.FileHandler(log_path, mode='a', encoding='utf-8')
+
+    # Create rotating file handler
+    file_handler = RotatingFileHandler(
+        log_path, mode='a', encoding='utf-8',
+        maxBytes=max_bytes, backupCount=backup_count,
+    )
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
     

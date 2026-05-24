@@ -1,0 +1,391 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<project version="4">
+  <component name="AutoImportSettings">
+    <option name="autoReloadType" value="SELECTIVE" />
+  </component>
+  <component name="ChangeListManager">
+    <list default="true" id="c2d956ca-f05e-4634-b60d-6240b565082c" name="Changes" comment="Initial Commit">
+      <change afterPath="$PROJECT_DIR$/.idea/CRPUtils.iml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/inspectionProfiles/profiles_settings.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/misc.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/modules.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/vcs.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/.idea/workspace.xml" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/column_identifier.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/start_fix.py" afterDir="false" />
+      <change afterPath="$PROJECT_DIR$/xfer.py" afterDir="false" />
+      <change beforePath="$PROJECT_DIR$/WorkLog_2026-03.xlsx" beforeDir="false" afterPath="$PROJECT_DIR$/WorkLog_2026-03.xlsx" afterDir="false" />
+    </list>
+    <option name="SHOW_DIALOG" value="false" />
+    <option name="HIGHLIGHT_CONFLICTS" value="true" />
+    <option name="HIGHLIGHT_NON_ACTIVE_CHANGELIST" value="false" />
+    <option name="LAST_RESOLUTION" value="IGNORE" />
+  </component>
+  <component name="CopilotPersistence">
+    <persistenceIdMap>
+      <entry key="_C:/Users/pyearick.CRP/OneDrive - CRP Industries Inc/CRPAF/PycharmProjects/CRPUtils" value="2d0M35dxrnmSEivkkIGngNSW2MH" />
+    </persistenceIdMap>
+  </component>
+  <component name="FileTemplateManagerImpl">
+    <option name="RECENT_TEMPLATES">
+      <list>
+        <option value="Python Script" />
+      </list>
+    </option>
+  </component>
+  <component name="Git.Settings">
+    <option name="RECENT_GIT_ROOT_PATH" value="$PROJECT_DIR$" />
+  </component>
+  <component name="GitHubPullRequestSearchHistory">{
+  &quot;lastFilter&quot;: {
+    &quot;state&quot;: &quot;OPEN&quot;,
+    &quot;assignee&quot;: &quot;pyearick&quot;
+  }
+}</component>
+  <component name="GithubPullRequestsUISettings">{
+  &quot;selectedUrlAndAccountId&quot;: {
+    &quot;url&quot;: &quot;https://github.com/pyearick/CRPUtils&quot;,
+    &quot;accountId&quot;: &quot;e6cc645a-8c47-4201-a4e4-2317d1c9bd28&quot;
+  }
+}</component>
+  <component name="ProjectColorInfo">{
+  &quot;associatedIndex&quot;: 3
+}</component>
+  <component name="ProjectId" id="2d0M35dxrnmSEivkkIGngNSW2MH" />
+  <component name="ProjectLevelVcsManager">
+    <ConfirmationsSetting value="2" id="Add" />
+  </component>
+  <component name="ProjectViewState">
+    <option name="hideEmptyMiddlePackages" value="true" />
+    <option name="showLibraryContents" value="true" />
+  </component>
+  <component name="PropertiesComponent"><![CDATA[{
+  "keyToString": {
+    "Python.Check_Chrome_Webdriver.executor": "Run",
+    "Python.Database_SchemaDateCheck.executor": "Run",
+    "Python.DuplicateImageDeleter.executor": "Run",
+    "Python.FileDates.executor": "Run",
+    "Python.FileExclusionGUI.executor": "Run",
+    "Python.GPTProjectUpload.executor": "Run",
+    "Python.GPTProjectUploadGUI.executor": "Run",
+    "Python.GPTProjectUploadGUI_SQL.executor": "Run",
+    "Python.GPTProjectUpload_r2.executor": "Run",
+    "Python.MotorFileComp.executor": "Run",
+    "Python.NSSMManagerGUI.executor": "Run",
+    "Python.Pdoc_SearchGUI.executor": "Run",
+    "Python.PivotSlicerUtil.executor": "Run",
+    "Python.Pivot_Builder.executor": "Run",
+    "Python.ProjectAnalyzerGUI.executor": "Run",
+    "Python.PunchlistCollator.executor": "Run",
+    "Python.PunchlistCommander.executor": "Run",
+    "Python.PunchlistGUI.executor": "Run",
+    "Python.Punchlist_manager.executor": "Run",
+    "Python.SynopsisAuditor.executor": "Run",
+    "Python.SynopsisToDocx.executor": "Run",
+    "Python.TableExclusionGUI.executor": "Run",
+    "Python.WorkLogGUI.executor": "Run",
+    "Python.database_utils.executor": "Run",
+    "Python.xfer.executor": "Run",
+    "RunOnceActivity.OpenProjectViewOnStart": "true",
+    "RunOnceActivity.ShowReadmeOnStart": "true",
+    "RunOnceActivity.TerminalTabsStorage.copyFrom.TerminalArrangementManager.252": "true",
+    "RunOnceActivity.git.unshallow": "true",
+    "git-widget-placeholder": "master",
+    "last_opened_file_path": "C:/Users/pyearick.CRP/OneDrive - CRP Industries Inc/CRPAF/PycharmProjects/CRPUtils",
+    "settings.editor.selected.configurable": "preferences.pluginManager"
+  }
+}]]></component>
+  <component name="RecentsManager">
+    <key name="CopyFile.RECENT_KEYS">
+      <recent name="C:\Users\pyearick.CRP\OneDrive - CRP Industries Inc\CRPAF\PycharmProjects\CRPUtils" />
+    </key>
+  </component>
+  <component name="SharedIndexes">
+    <attachedChunks>
+      <set>
+        <option value="bundled-python-sdk-f69e5c277ee4-cbfc7b97e6b2-com.jetbrains.pycharm.community.sharedIndexes.bundled-PC-252.27397.106" />
+      </set>
+    </attachedChunks>
+  </component>
+  <component name="SpellCheckerSettings" RuntimeDictionaries="0" Folders="0" CustomDictionaries="0" DefaultDictionary="application-level" UseSingleDictionary="true" transferred="true" />
+  <component name="TaskManager">
+    <task active="true" id="Default" summary="Default task">
+      <changelist id="c2d956ca-f05e-4634-b60d-6240b565082c" name="Changes" comment="" />
+      <created>1709140340089</created>
+      <option name="number" value="Default" />
+      <option name="presentableId" value="Default" />
+      <updated>1709140340089</updated>
+    </task>
+    <task id="LOCAL-00001" summary="new commit">
+      <option name="closed" value="true" />
+      <created>1737136298440</created>
+      <option name="number" value="00001" />
+      <option name="presentableId" value="LOCAL-00001" />
+      <option name="project" value="LOCAL" />
+      <updated>1737136298440</updated>
+    </task>
+    <task id="LOCAL-00002" summary="new commit">
+      <option name="closed" value="true" />
+      <created>1737136313067</created>
+      <option name="number" value="00002" />
+      <option name="presentableId" value="LOCAL-00002" />
+      <option name="project" value="LOCAL" />
+      <updated>1737136313067</updated>
+    </task>
+    <task id="LOCAL-00003" summary="new commit">
+      <option name="closed" value="true" />
+      <created>1737136691231</created>
+      <option name="number" value="00003" />
+      <option name="presentableId" value="LOCAL-00003" />
+      <option name="project" value="LOCAL" />
+      <updated>1737136691231</updated>
+    </task>
+    <task id="LOCAL-00004" summary="next commit - just to copy file to paste later">
+      <option name="closed" value="true" />
+      <created>1737137057499</created>
+      <option name="number" value="00004" />
+      <option name="presentableId" value="LOCAL-00004" />
+      <option name="project" value="LOCAL" />
+      <updated>1737137057499</updated>
+    </task>
+    <task id="LOCAL-00005" summary="working before new changes.">
+      <option name="closed" value="true" />
+      <created>1737347706244</created>
+      <option name="number" value="00005" />
+      <option name="presentableId" value="LOCAL-00005" />
+      <option name="project" value="LOCAL" />
+      <updated>1737347706244</updated>
+    </task>
+    <task id="LOCAL-00006" summary="much smaller but can therefore include more directories">
+      <option name="closed" value="true" />
+      <created>1737348606500</created>
+      <option name="number" value="00006" />
+      <option name="presentableId" value="LOCAL-00006" />
+      <option name="project" value="LOCAL" />
+      <updated>1737348606500</updated>
+    </task>
+    <task id="LOCAL-00007" summary="going to try some .xml changes - working version">
+      <option name="closed" value="true" />
+      <created>1737399562612</created>
+      <option name="number" value="00007" />
+      <option name="presentableId" value="LOCAL-00007" />
+      <option name="project" value="LOCAL" />
+      <updated>1737399562612</updated>
+    </task>
+    <task id="LOCAL-00008" summary="initial commit - GUI utility to exclude some Supplier files due to no/bad data">
+      <option name="closed" value="true" />
+      <created>1737662285751</created>
+      <option name="number" value="00008" />
+      <option name="presentableId" value="LOCAL-00008" />
+      <option name="project" value="LOCAL" />
+      <updated>1737662285751</updated>
+    </task>
+    <task id="LOCAL-00009" summary="working well but will be adding changes to allow sorting.">
+      <option name="closed" value="true" />
+      <created>1741969403435</created>
+      <option name="number" value="00009" />
+      <option name="presentableId" value="LOCAL-00009" />
+      <option name="project" value="LOCAL" />
+      <updated>1741969403435</updated>
+    </task>
+    <task id="LOCAL-00010" summary="wasn't including the source code.">
+      <option name="closed" value="true" />
+      <created>1743001310985</created>
+      <option name="number" value="00010" />
+      <option name="presentableId" value="LOCAL-00010" />
+      <option name="project" value="LOCAL" />
+      <updated>1743001310985</updated>
+    </task>
+    <task id="LOCAL-00011" summary="Initial commit for multiple scripts">
+      <option name="closed" value="true" />
+      <created>1772305833975</created>
+      <option name="number" value="00011" />
+      <option name="presentableId" value="LOCAL-00011" />
+      <option name="project" value="LOCAL" />
+      <updated>1772305833975</updated>
+    </task>
+    <task id="LOCAL-00012" summary="GUI update">
+      <option name="closed" value="true" />
+      <created>1772490115733</created>
+      <option name="number" value="00012" />
+      <option name="presentableId" value="LOCAL-00012" />
+      <option name="project" value="LOCAL" />
+      <updated>1772490115733</updated>
+    </task>
+    <task id="LOCAL-00013" summary="GUI update before adding date/time">
+      <option name="closed" value="true" />
+      <created>1774695224906</created>
+      <option name="number" value="00013" />
+      <option name="presentableId" value="LOCAL-00013" />
+      <option name="project" value="LOCAL" />
+      <updated>1774695224906</updated>
+    </task>
+    <task id="LOCAL-00014" summary="GUI update after adding date/time">
+      <option name="closed" value="true" />
+      <created>1774696036207</created>
+      <option name="number" value="00014" />
+      <option name="presentableId" value="LOCAL-00014" />
+      <option name="project" value="LOCAL" />
+      <updated>1774696036207</updated>
+    </task>
+    <task id="LOCAL-00015" summary="Initial commits">
+      <option name="closed" value="true" />
+      <created>1774696067539</created>
+      <option name="number" value="00015" />
+      <option name="presentableId" value="LOCAL-00015" />
+      <option name="project" value="LOCAL" />
+      <updated>1774696067539</updated>
+    </task>
+    <task id="LOCAL-00016" summary="Stopped including Archive in pdoc">
+      <option name="closed" value="true" />
+      <created>1774712230215</created>
+      <option name="number" value="00016" />
+      <option name="presentableId" value="LOCAL-00016" />
+      <option name="project" value="LOCAL" />
+      <updated>1774712230215</updated>
+    </task>
+    <task id="LOCAL-00017" summary="Added 'collect' for the PMA OverSeerAgent">
+      <option name="closed" value="true" />
+      <created>1774813061144</created>
+      <option name="number" value="00017" />
+      <option name="presentableId" value="LOCAL-00017" />
+      <option name="project" value="LOCAL" />
+      <updated>1774813061144</updated>
+    </task>
+    <task id="LOCAL-00018" summary="Added source file line numbers to the .xml file">
+      <option name="closed" value="true" />
+      <created>1774964779721</created>
+      <option name="number" value="00018" />
+      <option name="presentableId" value="LOCAL-00018" />
+      <option name="project" value="LOCAL" />
+      <updated>1774964779721</updated>
+    </task>
+    <task id="LOCAL-00019" summary="Fixed corrupting bug in PunchlistCollator.py">
+      <option name="closed" value="true" />
+      <created>1775005180392</created>
+      <option name="number" value="00019" />
+      <option name="presentableId" value="LOCAL-00019" />
+      <option name="project" value="LOCAL" />
+      <updated>1775005180392</updated>
+    </task>
+    <task id="LOCAL-00020" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1775005237601</created>
+      <option name="number" value="00020" />
+      <option name="presentableId" value="LOCAL-00020" />
+      <option name="project" value="LOCAL" />
+      <updated>1775005237601</updated>
+    </task>
+    <task id="LOCAL-00021" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1775008945476</created>
+      <option name="number" value="00021" />
+      <option name="presentableId" value="LOCAL-00021" />
+      <option name="project" value="LOCAL" />
+      <updated>1775008945476</updated>
+    </task>
+    <task id="LOCAL-00022" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1775008958727</created>
+      <option name="number" value="00022" />
+      <option name="presentableId" value="LOCAL-00022" />
+      <option name="project" value="LOCAL" />
+      <updated>1775008958727</updated>
+    </task>
+    <task id="LOCAL-00023" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1776779140159</created>
+      <option name="number" value="00023" />
+      <option name="presentableId" value="LOCAL-00023" />
+      <option name="project" value="LOCAL" />
+      <updated>1776779140159</updated>
+    </task>
+    <task id="LOCAL-00024" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1777995995451</created>
+      <option name="number" value="00024" />
+      <option name="presentableId" value="LOCAL-00024" />
+      <option name="project" value="LOCAL" />
+      <updated>1777995995451</updated>
+    </task>
+    <task id="LOCAL-00025" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1778340945531</created>
+      <option name="number" value="00025" />
+      <option name="presentableId" value="LOCAL-00025" />
+      <option name="project" value="LOCAL" />
+      <updated>1778340945531</updated>
+    </task>
+    <task id="LOCAL-00026" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1778340960254</created>
+      <option name="number" value="00026" />
+      <option name="presentableId" value="LOCAL-00026" />
+      <option name="project" value="LOCAL" />
+      <updated>1778340960254</updated>
+    </task>
+    <task id="LOCAL-00027" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1778340997248</created>
+      <option name="number" value="00027" />
+      <option name="presentableId" value="LOCAL-00027" />
+      <option name="project" value="LOCAL" />
+      <updated>1778340997248</updated>
+    </task>
+    <task id="LOCAL-00028" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1778341010056</created>
+      <option name="number" value="00028" />
+      <option name="presentableId" value="LOCAL-00028" />
+      <option name="project" value="LOCAL" />
+      <updated>1778341010056</updated>
+    </task>
+    <task id="LOCAL-00029" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1779588491382</created>
+      <option name="number" value="00029" />
+      <option name="presentableId" value="LOCAL-00029" />
+      <option name="project" value="LOCAL" />
+      <updated>1779588491382</updated>
+    </task>
+    <task id="LOCAL-00030" summary="Initial Commit">
+      <option name="closed" value="true" />
+      <created>1779588525866</created>
+      <option name="number" value="00030" />
+      <option name="presentableId" value="LOCAL-00030" />
+      <option name="project" value="LOCAL" />
+      <updated>1779588525866</updated>
+    </task>
+    <option name="localTasksCounter" value="31" />
+    <servers />
+  </component>
+  <component name="VcsManagerConfiguration">
+    <MESSAGE value="new commit" />
+    <MESSAGE value="next commit - just to copy file to paste later" />
+    <MESSAGE value="working before new changes." />
+    <MESSAGE value="much smaller but can therefore include more directories" />
+    <MESSAGE value="going to try some .xml changes - working version" />
+    <MESSAGE value="initial commit - GUI utility to exclude some Supplier files due to no/bad data" />
+    <MESSAGE value="working well but will be adding changes to allow sorting." />
+    <MESSAGE value="wasn't including the source code." />
+    <MESSAGE value="Initial commit for multiple scripts" />
+    <MESSAGE value="GUI update" />
+    <MESSAGE value="GUI update before adding date/time" />
+    <MESSAGE value="GUI update after adding date/time" />
+    <MESSAGE value="Initial commits" />
+    <MESSAGE value="Stopped including Archive in pdoc" />
+    <MESSAGE value="Added 'collect' for the PMA OverSeerAgent" />
+    <MESSAGE value="Added source file line numbers to the .xml file" />
+    <MESSAGE value="Fixed corrupting bug in PunchlistCollator.py" />
+    <MESSAGE value="Initial Commit" />
+    <option name="LAST_COMMIT_MESSAGE" value="Initial Commit" />
+  </component>
+  <component name="github-copilot-workspace">
+    <instructionFileLocations>
+      <option value=".github/instructions" />
+    </instructionFileLocations>
+    <promptFileLocations>
+      <option value=".github/prompts" />
+    </promptFileLocations>
+  </component>
+</project>
