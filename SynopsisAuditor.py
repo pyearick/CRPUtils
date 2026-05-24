@@ -37,6 +37,23 @@ from collections import defaultdict
 
 LOG_FILE = r"C:\Logs\SynopsisAuditor.log"
 
+# Default project roots searched when no folder argument is supplied.
+# Each entry is searched recursively for *_Synopsis.md files, so
+# synopsis files are read in place from their own project folders —
+# no need to copy them into one Results folder first.
+# Fill in your actual project parent directories here.
+SYNOPSIS_ROOTS = [
+    str(Path(__file__).resolve().parent.parent / 'Results'),
+]
+
+# Subdirectory names skipped during recursive search, so stale copies
+# in backup/archive folders don't get picked up as live synopses.
+SYNOPSIS_EXCLUDE_DIRS = {
+    'archive', 'archived', 'backup', 'backups', 'bak', 'old', '_old',
+    'temp', 'tmp', '.git', 'node_modules', '__pycache__',
+    'venv', '.venv', '.idea', '.vs',
+}
+
 # Known external dependency owners — expand as needed
 DEPENDENCY_OWNERS = ['Byron', 'IT', 'DBA', 'ERP']
 
@@ -145,15 +162,66 @@ class SynopsisClaims:
 # SYNOPSIS READER
 # =============================================================================
 
-def find_synopsis_files(folder: str) -> List[Path]:
-    """Find all *_Synopsis.md files in the given folder."""
-    folder_path = Path(folder)
-    if not folder_path.exists():
-        logger.warning(f"Synopsis folder does not exist: {folder}")
-        return []
+def find_synopsis_files(roots, recursive: bool = True) -> List[Path]:
+    """
+    Find all *_Synopsis.md files under one or more locations.
 
-    files = sorted(folder_path.glob('*_Synopsis.md'))
-    logger.info(f"Found {len(files)} synopsis file(s) in {folder}")
+    `roots` may be a single path (str or Path) or a list of paths.
+    A path may point to a folder or directly to a synopsis file.
+
+    When recursive=True (default), each folder is searched at any
+    depth, so synopsis files are read in place from their own
+    project directories — no need to copy them into one folder.
+    Subdirectories named in SYNOPSIS_EXCLUDE_DIRS (archive, backup,
+    .git, etc.) are skipped so stale copies are not picked up.
+    """
+    if isinstance(roots, (str, Path)):
+        roots = [roots]
+
+    files: List[Path] = []
+    seen: Set[Path] = set()
+
+    for root in roots:
+        root_path = Path(root)
+        if not root_path.exists():
+            logger.warning(f"Synopsis path does not exist: {root}")
+            continue
+
+        if root_path.is_file():
+            candidates = (
+                [root_path]
+                if root_path.name.endswith('_Synopsis.md')
+                else []
+            )
+        else:
+            pattern = '*_Synopsis.md'
+            candidates = (
+                root_path.rglob(pattern) if recursive
+                else root_path.glob(pattern)
+            )
+
+        for f in candidates:
+            # Skip files under an excluded subdirectory, but only
+            # consider folders *below* the requested root — never
+            # the path leading up to it (e.g. a project under
+            # C:\Temp should still be found).
+            try:
+                rel_parts = f.relative_to(root_path).parts[:-1]
+            except ValueError:
+                rel_parts = f.parts[:-1]
+            if {p.lower() for p in rel_parts} & SYNOPSIS_EXCLUDE_DIRS:
+                continue
+            resolved = f.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            files.append(f)
+
+    files = sorted(files, key=lambda p: p.name.lower())
+    logger.info(
+        f"Found {len(files)} synopsis file(s) "
+        f"across {len(roots)} root(s)"
+    )
     return files
 
 
@@ -474,12 +542,24 @@ def parse_synopsis(filepath: Path) -> SynopsisClaims:
     return claims
 
 
-def parse_all_synopses(folder: str) -> Dict[str, SynopsisClaims]:
-    """Parse all synopsis files in a folder. Returns {project: claims}."""
-    files = find_synopsis_files(folder)
+def parse_all_synopses(roots, recursive: bool = True) -> Dict[str, SynopsisClaims]:
+    """
+    Parse all synopsis files found under one or more locations.
+
+    `roots` may be a single path (str or Path) or a list of paths.
+    Returns {project: claims}. If the same project name is found in
+    more than one location, the last one wins and a warning is logged.
+    """
+    files = find_synopsis_files(roots, recursive=recursive)
     all_claims = {}
     for f in files:
         claims = parse_synopsis(f)
+        if claims.project in all_claims:
+            logger.warning(
+                f"Duplicate synopsis for project '{claims.project}' — "
+                f"using {f}, overriding "
+                f"{all_claims[claims.project].filepath}"
+            )
         all_claims[claims.project] = claims
     return all_claims
 
@@ -901,18 +981,28 @@ def print_audit_report(
 # PUBLIC API  (for import by ProjectAnalyzer)
 # =============================================================================
 
-def audit_synopses(synopsis_folder: str) -> Dict[str, List[str]]:
+def audit_synopses(synopsis_roots=None, recursive: bool = True) -> Dict[str, List[str]]:
     """
     Main entry point for ProjectAnalyzer integration.
 
-    Reads all *_Synopsis.md from the given folder, runs the full
+    Finds all *_Synopsis.md under the given location(s), runs the full
     cross-reference audit, and returns per-project correction notes.
+
+    Args:
+        synopsis_roots: A single path (str or Path) or a list of paths.
+                        Folders are searched recursively by default, so
+                        synopsis files can stay in their own project
+                        directories. If None, SYNOPSIS_ROOTS is used.
+        recursive:      Search subfolders (default True).
 
     Returns:
         Dict mapping project_name -> list of correction note strings.
         Use format_prompt_section(notes) to convert to prompt text.
     """
-    all_claims = parse_all_synopses(synopsis_folder)
+    if synopsis_roots is None:
+        synopsis_roots = SYNOPSIS_ROOTS
+
+    all_claims = parse_all_synopses(synopsis_roots, recursive=recursive)
     if not all_claims:
         logger.warning("No synopses found — no cross-project intel.")
         return {}
@@ -938,12 +1028,16 @@ if __name__ == '__main__':
         description='Cross-Project Synopsis Auditor'
     )
     parser.add_argument(
-        'folder', nargs='?',
-        default=str(
-            Path(__file__).resolve().parent.parent / 'Results'
-        ),
-        help='Folder containing *_Synopsis.md files '
-             '(default: ../Results)'
+        'folders', nargs='*',
+        default=SYNOPSIS_ROOTS,
+        help='One or more folders (or synopsis files) to scan. '
+             'Folders are searched recursively so synopsis files '
+             'can stay in their own project directories. '
+             '(default: SYNOPSIS_ROOTS)'
+    )
+    parser.add_argument(
+        '--no-recursive', action='store_true',
+        help='Only scan the top level of each folder, no subfolders'
     )
     parser.add_argument(
         '--verbose', '-v', action='store_true',
@@ -952,8 +1046,12 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
-    print(f"Scanning: {args.folder}")
-    all_claims = parse_all_synopses(args.folder)
+    recursive = not args.no_recursive
+    folders = args.folders if args.folders else SYNOPSIS_ROOTS
+
+    print(f"Scanning: {', '.join(str(f) for f in folders)}")
+    print(f"Recursive: {recursive}")
+    all_claims = parse_all_synopses(folders, recursive=recursive)
 
     if not all_claims:
         print("No synopsis files found.")
