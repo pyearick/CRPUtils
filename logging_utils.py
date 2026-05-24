@@ -60,7 +60,6 @@ def setup_logging(
     Set up standardized logging for BDH scripts.
 
     Creates a logger that writes to both file and console (optional).
-    File output is line-buffered by default so logs appear immediately.
     Log files rotate at max_bytes with backup_count old files retained.
 
     Args:
@@ -68,7 +67,9 @@ def setup_logging(
                   e.g., 'BDH_06_ShowMeTheParts' -> C:\\Logs\\BDH_06_ShowMeTheParts.log
         log_dir: Directory for log files (default: C:\\Logs)
         level: Logging level (default: logging.INFO)
-        line_buffered: If True, flush after each line (default: True)
+        line_buffered: Retained for backward compatibility; has no effect.
+                       Python's logging flushes after every record by default.
+                       (default: True)
         include_console: If True, also log to console (default: True)
         format_string: Log message format
         max_bytes: Rotate log file at this size in bytes (default: 50 MB)
@@ -97,13 +98,7 @@ def setup_logging(
     )
     file_handler.setLevel(level)
     file_handler.setFormatter(formatter)
-    
-    # Enable line buffering if requested (writes immediately to disk)
-    if line_buffered:
-        # Close default stream and reopen with line buffering
-        file_handler.stream.close()
-        file_handler.stream = open(log_path, 'a', encoding='utf-8', buffering=1)
-    
+
     # Build handlers list
     handlers = [file_handler]
     
