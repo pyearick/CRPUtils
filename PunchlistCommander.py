@@ -15,6 +15,10 @@ Tables managed (created on first run if they don't exist):
 
 Reads from existing PMA_PunchlistItems table.
 
+The Start Fix action is delegated to the start_fix module, which assembles
+a context brief and launches Claude Code (and manages its own
+PMA_PunchlistWorkLog table).
+
 Lives in: CRPUtils folder
 Database: BI-SQL001 / CRPAF
 
@@ -26,11 +30,22 @@ import os
 import sys
 import re
 import logging
+import threading
 import webbrowser
 import pyodbc
 import tkinter as tk
 from tkinter import ttk, messagebox, simpledialog, scrolledtext
 from datetime import datetime
+
+# Start Fix engine - pdoc rebuild, ProjectAnalyzer, Claude Code launch.
+# Imported defensively: if it fails to load, the Start Fix button reports
+# the problem instead of the whole Commander failing to start.
+try:
+    import start_fix
+    _START_FIX_IMPORT_ERROR = None
+except Exception as _e:                      # noqa: BLE001
+    start_fix = None
+    _START_FIX_IMPORT_ERROR = str(_e)
 
 # =============================================================================
 # CONFIGURATION
@@ -608,6 +623,8 @@ class PunchlistCommander(tk.Tk):
         self.checked_item_ids = set()        # set of int IDs currently checked
         self.tree_node_to_item = {}          # tree iid -> item dict
         self.current_detail_item = None      # item shown in detail pane
+        self._start_fix_busy = False         # guards against concurrent runs
+        self._btn_start_fix = None           # detail-pane Start Fix button ref
 
         # Build UI
         self._build_toolbar()
@@ -841,6 +858,19 @@ class PunchlistCommander(tk.Tk):
         actions = tk.Frame(self.detail_frame, bg=COLORS['bg'])
         actions.pack(fill=tk.X, padx=12, pady=(4, 8))
 
+        # Start Fix - assemble a context brief and launch Claude Code.
+        self._btn_start_fix = tk.Button(
+            actions, text="🔧 Start Fix",
+            command=lambda: self._start_fix(item),
+            bg=COLORS['btn_success'], fg=COLORS['btn_fg'], bd=0,
+            padx=10, pady=4, font=('Segoe UI', 9, 'bold')
+        )
+        self._btn_start_fix.pack(side=tk.LEFT, padx=2)
+        if self._start_fix_busy:
+            # A run is in flight (detail pane re-rendered mid-run) - keep
+            # the button locked so it reflects the true state.
+            self._btn_start_fix.config(state=tk.DISABLED, text="⏳ Start Fix…")
+
         tk.Button(
             actions, text="📋 Copy resume prompt",
             command=lambda: self._copy_prompt(item, is_followon=False),
@@ -1037,6 +1067,10 @@ class PunchlistCommander(tk.Tk):
         self.context_menu.add_command(
             label="🚀 Launch this item",
             command=lambda: self._launch_one(item)
+        )
+        self.context_menu.add_command(
+            label="🔧 Start Fix (Claude Code)",
+            command=lambda: self._start_fix(item)
         )
         self.context_menu.add_separator()
         current = get_current_chat_link(item['id'])
@@ -1249,6 +1283,101 @@ class PunchlistCommander(tk.Tk):
             if self.current_detail_item and self.current_detail_item['id'] == item['id']:
                 self._render_detail(item)
         return True
+
+    # -------------------------------------------------------------------------
+    # Start Fix
+    # -------------------------------------------------------------------------
+
+    def _start_fix(self, item):
+        """
+        Assemble a context brief for this item and launch Claude Code against
+        the project folder. The slow work - pdoc rebuild and the ProjectAnalyzer
+        scan - runs on a background thread so the GUI stays responsive.
+        """
+        if start_fix is None:
+            messagebox.showerror(
+                "Start Fix unavailable",
+                "The start_fix module could not be loaded:\n\n"
+                f"{_START_FIX_IMPORT_ERROR}\n\n"
+                "Confirm start_fix.py is present in the CRPUtils folder."
+            )
+            return
+
+        if self._start_fix_busy:
+            messagebox.showinfo(
+                "Start Fix in progress",
+                "A Start Fix is already running. Let it finish before "
+                "starting another one."
+            )
+            return
+
+        if not messagebox.askyesno(
+            "Start Fix?",
+            f"Start a fix for {item['item_number']} — {item['title']}?\n\n"
+            "This rebuilds the project's pdoc, runs ProjectAnalyzer, assembles "
+            "a brief, and opens Claude Code in a new window to work the item."
+        ):
+            return
+
+        # Lock out re-entry and give visual feedback.
+        self._start_fix_busy = True
+        try:
+            self._btn_start_fix.config(state=tk.DISABLED, text="⏳ Start Fix…")
+        except (AttributeError, tk.TclError):
+            pass
+        self.status_var.set(
+            f"Start Fix: preparing brief for {item['item_number']} "
+            "(rebuilding pdoc, running ProjectAnalyzer)…"
+        )
+
+        def worker():
+            try:
+                result = start_fix.start_fix(item['project'], item['id'])
+            except Exception as e:                       # noqa: BLE001
+                logger.exception("Start Fix worker failed")
+                result = {'ok': False, 'brief_path': None,
+                          'work_log_id': None,
+                          'message': f"Start Fix failed: {e}"}
+            # Marshal the result back onto the GUI thread.
+            self.after(0, self._start_fix_done, item, result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _start_fix_done(self, item, result):
+        """Runs on the GUI thread after the Start Fix worker finishes."""
+        self._start_fix_busy = False
+        try:
+            self._btn_start_fix.config(state=tk.NORMAL, text="🔧 Start Fix")
+        except (AttributeError, tk.TclError):
+            pass
+
+        if result.get('ok'):
+            # Starting a fix is a clear "work has begun" signal.
+            if item.get('status') == 'Open':
+                try:
+                    update_item_status(item['id'], 'In Progress')
+                    logger.info(f"Start Fix promoted item {item['id']} "
+                                "to In Progress")
+                except Exception:
+                    logger.exception("Status flip failed (non-fatal)")
+            self.status_var.set(
+                f"Start Fix launched for {item['item_number']}."
+            )
+            messagebox.showinfo(
+                "Start Fix launched",
+                f"{result.get('message', '')}\n\n"
+                "Claude Code is opening in its own window. Brief:\n"
+                f"{result.get('brief_path') or '(not recorded)'}"
+            )
+            self.refresh_tree()
+        else:
+            self.status_var.set(
+                f"Start Fix did not launch for {item['item_number']}."
+            )
+            messagebox.showwarning(
+                "Start Fix did not launch",
+                result.get('message', 'Unknown error.')
+            )
 
     # -------------------------------------------------------------------------
     # URL capture / save
