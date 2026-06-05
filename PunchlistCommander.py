@@ -47,6 +47,13 @@ except Exception as _e:                      # noqa: BLE001
     start_fix = None
     _START_FIX_IMPORT_ERROR = str(_e)
 
+try:
+    import PunchlistQC
+    _QC_IMPORT_ERROR = None
+except Exception as _e:                      # noqa: BLE001
+    PunchlistQC = None
+    _QC_IMPORT_ERROR = str(_e)
+
 # =============================================================================
 # CONFIGURATION
 # =============================================================================
@@ -666,6 +673,14 @@ class PunchlistCommander(tk.Tk):
             font=('Segoe UI', 9, 'bold')
         )
         btn_refresh.pack(side=tk.RIGHT, padx=5, pady=8)
+
+        btn_qc = tk.Button(
+            bar, text="🔍 QC", command=self._run_qc_report,
+            bg=COLORS['btn_warning'], fg=COLORS['btn_fg'],
+            activebackground='#d68910', bd=0, padx=10, pady=4,
+            font=('Segoe UI', 9, 'bold')
+        )
+        btn_qc.pack(side=tk.RIGHT, padx=5, pady=8)
 
         self.btn_launch = tk.Button(
             bar, text="🚀 Launch Selected (0)",
@@ -1629,6 +1644,243 @@ class PunchlistCommander(tk.Tk):
             tk.Button(btns, text=txt, command=cmd, bg=color,
                       fg=COLORS['btn_fg'], bd=0, padx=12, pady=4,
                       font=('Segoe UI', 9)).pack(side=tk.LEFT, padx=3)
+
+    # -------------------------------------------------------------------------
+    # QC report
+    # -------------------------------------------------------------------------
+
+    def _run_qc_report(self):
+        """Launch the punchlist QC analysis in a background thread."""
+        if _QC_IMPORT_ERROR:
+            messagebox.showerror(
+                "QC unavailable",
+                f"PunchlistQC failed to load:\n{_QC_IMPORT_ERROR}"
+            )
+            return
+
+        self.status_var.set("Running QC analysis… (this may take 30–60 seconds)")
+
+        def _worker():
+            try:
+                findings, items_by_id = PunchlistQC.run_qc()
+            except Exception as exc:
+                self.after(0, lambda: messagebox.showerror("QC Error", str(exc)))
+                self.after(0, lambda: self.status_var.set("QC analysis failed."))
+                return
+            n = len(findings)
+            self.after(0, lambda: self._show_qc_dialog(findings, items_by_id))
+            self.after(0, lambda: self.status_var.set(
+                f"QC complete — {n} finding(s)." if n else "QC complete — no issues found."
+            ))
+
+        threading.Thread(target=_worker, daemon=True).start()
+
+    def _show_qc_dialog(self, findings, items_by_id):
+        """Display QC findings in a scrollable dialog with per-finding action buttons."""
+        win = tk.Toplevel(self)
+        win.title("Punchlist QC Report")
+        win.geometry("820x600")
+        win.configure(bg=COLORS['bg'])
+        win.grab_set()
+
+        # Header
+        tk.Label(
+            win, text="🔍 Punchlist QC Report",
+            bg=COLORS['header_bg'], fg=COLORS['header_fg'],
+            font=('Segoe UI', 13, 'bold'), anchor='w', padx=12
+        ).pack(fill=tk.X)
+
+        if not findings:
+            tk.Label(
+                win, text="\n✅  No issues found — all open items look good.\n",
+                bg=COLORS['bg'], font=('Segoe UI', 11), fg='#27ae60'
+            ).pack(pady=40)
+            tk.Button(
+                win, text="Close", command=win.destroy,
+                bg=COLORS['btn_primary'], fg=COLORS['btn_fg'],
+                bd=0, padx=20, pady=6, font=('Segoe UI', 9)
+            ).pack(pady=8)
+            return
+
+        # Scrollable findings area
+        container = tk.Frame(win, bg=COLORS['bg'])
+        container.pack(fill=tk.BOTH, expand=True, padx=8, pady=8)
+
+        canvas = tk.Canvas(container, bg=COLORS['bg'], highlightthickness=0)
+        sb = ttk.Scrollbar(container, orient=tk.VERTICAL, command=canvas.yview)
+        inner = tk.Frame(canvas, bg=COLORS['bg'])
+
+        inner_id = canvas.create_window((0, 0), window=inner, anchor='nw')
+        canvas.configure(yscrollcommand=sb.set)
+
+        def _on_inner_configure(_event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+
+        def _on_canvas_configure(event):
+            canvas.itemconfig(inner_id, width=event.width)
+
+        inner.bind("<Configure>", _on_inner_configure)
+        canvas.bind("<Configure>", _on_canvas_configure)
+        _scroll_cb = lambda e: canvas.yview_scroll(-1 * (e.delta // 120), "units")
+        win.bind("<MouseWheel>", _scroll_cb)
+        win.protocol("WM_DELETE_WINDOW", lambda: (win.unbind("<MouseWheel>"), win.destroy()))
+
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        sb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        # Type display config: (badge_text, badge_fg, badge_bg)
+        type_cfg = {
+            'duplicate':    ("🔄 DUPLICATE",    'white', '#e67e22'),
+            'already_done': ("✅ ALREADY DONE", 'white', '#2980b9'),
+            'stale':        ("⏰ STALE",        'white', '#7f8c8d'),
+        }
+
+        active_findings = list(findings)   # mutable so cards can remove themselves
+
+        def _dismiss_card(card_frame, finding):
+            card_frame.destroy()
+            active_findings.remove(finding)
+            if not active_findings:
+                _show_all_done()
+
+        def _mark_completed_action(card_frame, finding):
+            item_id  = finding['item_id']
+            item_num = finding.get('item_number', str(item_id))
+            if not messagebox.askyesno(
+                "Mark completed?",
+                f"Mark {item_num} as Completed?\n\n"
+                "Sets Status=Completed and CompletedDate=now in PMA_PunchlistItems.",
+                parent=win
+            ):
+                return
+            conn = get_connection()
+            try:
+                PunchlistQC.apply_mark_completed(conn, item_id)
+            finally:
+                conn.close()
+            _dismiss_card(card_frame, finding)
+            self.refresh_tree()
+
+        def _flag_duplicate_action(card_frame, finding):
+            item_id  = finding['item_id']
+            item_num = finding.get('item_number', str(item_id))
+            related_num  = finding.get('related_item_number', '?')
+            related_proj = finding.get('related_project', '?')
+            related_ref  = f"{related_num} ({related_proj})"
+            if not messagebox.askyesno(
+                "Flag as duplicate?",
+                f"Prepend a duplicate warning to {item_num}'s description?\n\n"
+                f"Will note: possible duplicate of {related_ref}.",
+                parent=win
+            ):
+                return
+            conn = get_connection()
+            try:
+                PunchlistQC.apply_flag_duplicate(conn, item_id, related_ref)
+            finally:
+                conn.close()
+            _dismiss_card(card_frame, finding)
+            self.refresh_tree()
+
+        def _show_all_done():
+            for w in inner.winfo_children():
+                w.destroy()
+            tk.Label(
+                inner, text="\n✅  All findings resolved.\n",
+                bg=COLORS['bg'], font=('Segoe UI', 11), fg='#27ae60'
+            ).pack(pady=30)
+
+        # Build one card per finding
+        for finding in findings:
+            ftype = finding.get('type', '')
+            badge_text, badge_fg, badge_bg = type_cfg.get(
+                ftype, (ftype.upper(), 'white', '#555')
+            )
+
+            card = tk.LabelFrame(
+                inner, bg=COLORS['bg'],
+                relief=tk.GROOVE, bd=1, padx=10, pady=8
+            )
+            card.pack(fill=tk.X, padx=6, pady=5, ipadx=4, ipady=4)
+
+            # Badge + item reference row
+            top = tk.Frame(card, bg=COLORS['bg'])
+            top.pack(fill=tk.X)
+
+            tk.Label(
+                top, text=badge_text,
+                bg=badge_bg, fg=badge_fg,
+                font=('Segoe UI', 8, 'bold'), padx=6, pady=2
+            ).pack(side=tk.LEFT, padx=(0, 8))
+
+            proj    = finding.get('project', '')
+            num     = finding.get('item_number', '')
+            title   = finding.get('title', '')
+            ref_str = f"{proj} | {num}: {title}"
+            tk.Label(
+                top, text=ref_str,
+                bg=COLORS['bg'], font=('Segoe UI', 9, 'bold'),
+                anchor='w', wraplength=580, justify=tk.LEFT
+            ).pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            # Related item (for duplicate / already_done)
+            if finding.get('related_item_number'):
+                rel_text = (
+                    f"Related: {finding.get('related_project')} | "
+                    f"{finding.get('related_item_number')}"
+                )
+                tk.Label(
+                    card, text=rel_text,
+                    bg=COLORS['bg'], fg='#555', font=('Segoe UI', 8, 'italic'),
+                    anchor='w'
+                ).pack(fill=tk.X, pady=(2, 0))
+
+            # Reason
+            tk.Label(
+                card, text=finding.get('reason', ''),
+                bg=COLORS['bg'], font=('Segoe UI', 9),
+                anchor='w', wraplength=720, justify=tk.LEFT
+            ).pack(fill=tk.X, pady=(4, 6))
+
+            # Action buttons
+            btns = tk.Frame(card, bg=COLORS['bg'])
+            btns.pack(anchor='w')
+
+            if ftype == 'duplicate':
+                older_num = finding.get('item_number', str(finding.get('item_id', '?')))
+                tk.Button(
+                    btns,
+                    text=f"🔁 Flag {older_num} as Duplicate",
+                    command=lambda c=card, f=finding: _flag_duplicate_action(c, f),
+                    bg=COLORS['btn_warning'], fg=COLORS['btn_fg'],
+                    bd=0, padx=8, pady=3, font=('Segoe UI', 8)
+                ).pack(side=tk.LEFT, padx=(0, 4))
+
+            elif ftype in ('already_done', 'stale'):
+                item_num = finding.get('item_number', str(finding.get('item_id', '?')))
+                tk.Button(
+                    btns,
+                    text=f"✓ Mark {item_num} Completed",
+                    command=lambda c=card, f=finding: _mark_completed_action(c, f),
+                    bg=COLORS['btn_success'], fg=COLORS['btn_fg'],
+                    bd=0, padx=8, pady=3, font=('Segoe UI', 8)
+                ).pack(side=tk.LEFT, padx=(0, 4))
+
+            # Dismiss is available for all types
+            tk.Button(
+                btns, text="✕ Dismiss",
+                command=lambda c=card, f=finding: _dismiss_card(c, f),
+                bg='#bdc3c7', fg='#2c3e50',
+                bd=0, padx=8, pady=3, font=('Segoe UI', 8)
+            ).pack(side=tk.LEFT)
+
+        # Footer close button
+        tk.Button(
+            win, text="Close",
+            command=win.destroy,
+            bg=COLORS['btn_primary'], fg=COLORS['btn_fg'],
+            bd=0, padx=20, pady=6, font=('Segoe UI', 9)
+        ).pack(pady=8)
 
     # -------------------------------------------------------------------------
     # Misc
