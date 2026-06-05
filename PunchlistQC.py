@@ -159,14 +159,22 @@ def _fmt_completed(item):
     return '\n'.join(lines)
 
 
-def build_qc_prompt(open_items, completed_items):
+def build_qc_prompt(focus_items, other_open_items, completed_items):
+    """
+    Build a focused QC prompt for one project's items.
+
+    focus_items      — the project being reviewed; AI only flags these.
+    other_open_items — open items from all other projects, provided as cross-reference context.
+    completed_items  — recently completed items (all projects) for already-done detection.
+    """
+    project = focus_items[0]['project'] if focus_items else '?'
     sep = '=' * 60
     schema = (
         '{\n'
         '  "findings": [\n'
         '    {\n'
         '      "type": "duplicate" | "already_done" | "stale",\n'
-        '      "item_id": <int — open item being flagged>,\n'
+        '      "item_id": <int — FOCUS item being flagged>,\n'
         '      "item_number": "<string>",\n'
         '      "project": "<string>",\n'
         '      "title": "<string>",\n'
@@ -181,20 +189,33 @@ def build_qc_prompt(open_items, completed_items):
     )
     parts = [
         "You are a QC analyst reviewing open work items for CRP Industries, an automotive aftermarket parts company.\n\n",
-        "Identify genuine problems only. Return valid JSON matching the schema below — no markdown, no extra keys.\n\n",
+        f"Review the FOCUS ITEMS from project {project} below. For each focus item, check:\n"
+        "  1. Against other focus items — do any two request substantially the same thing? (within-project duplicate)\n"
+        "  2. Against COMPARISON items — does any focus item overlap significantly with an item from another project? (cross-project duplicate)\n"
+        "  3. Against COMPLETED items — is any focus item's goal already achieved by a recently completed item?\n"
+        "  4. On its own — is any focus item stale (created 6+ months ago AND description is vague or unactionable)?\n\n"
+        "Only flag FOCUS items in your output. Comparison and Completed items are reference context only.\n"
+        "Flag anything that looks questionable — the human will make the final call.\n"
+        "Lean toward surfacing potential issues rather than suppressing them.\n\n",
         "FINDING TYPES:\n"
-        "  duplicate    - Two open items that request substantially the same thing.\n"
-        "                 Set item_id = the lower numeric ID (older item), related_item_id = the other.\n"
-        "  already_done - An open item whose goal is clearly covered by a recently completed item.\n"
-        "                 Set item_id = the open item, related_item_id = the completed item.\n"
-        "  stale        - An open item that is 6+ months old with a vague or unactionable description.\n"
-        "                 Set related_item_id / related_item_number / related_project all to null.\n\n"
-        "When in doubt, omit. An empty findings list is a valid and preferred result over false positives.\n\n",
-        f"JSON SCHEMA:\n{schema}\n\n",
-        f"\n{sep}\nOPEN ITEMS ({len(open_items)})\n{sep}\n\n",
+        "  duplicate    - Two items requesting substantially the same thing.\n"
+        "                 Set item_id = the FOCUS item, related_item_id = the item it duplicates.\n"
+        "  already_done - A focus item whose goal is covered by a completed item.\n"
+        "                 Set item_id = the focus item, related_item_id = the completed item.\n"
+        "  stale        - A focus item that is old AND vague/unactionable.\n"
+        "                 Set related_item_id / related_item_number / related_project to null.\n\n",
+        f"JSON SCHEMA (return this structure only — no markdown, no extra keys):\n{schema}\n\n",
+        f"\n{sep}\nFOCUS ITEMS — {project} ({len(focus_items)})\n{sep}\n\n",
     ]
-    for item in open_items:
+    for item in focus_items:
         parts.append(_fmt_open(item) + '\n\n')
+
+    if other_open_items:
+        parts.append(
+            f"\n{sep}\nCOMPARISON: OTHER PROJECTS' OPEN ITEMS ({len(other_open_items)})\n{sep}\n\n"
+        )
+        for item in other_open_items:
+            parts.append(_fmt_open(item) + '\n\n')
 
     if completed_items:
         parts.append(
@@ -221,19 +242,19 @@ def _get_llm_client():
     return AzureOpenAI(api_key=api_key, api_version="2024-02-01", azure_endpoint=endpoint)
 
 
-def run_analysis(open_items, completed_items):
+def run_analysis(focus_items, other_open_items, completed_items):
     """
-    Call Azure OpenAI for QC analysis.  Returns a list of finding dicts.
+    Call Azure OpenAI for one project's QC pass.  Returns a list of finding dicts.
     Each finding has: type, item_id, item_number, project, title,
     related_item_id, related_item_number, related_project, reason.
     """
-    if not open_items:
-        logger.info("No open items — skipping analysis.")
+    if not focus_items:
         return []
 
+    project = focus_items[0]['project']
     client = _get_llm_client()
-    prompt = build_qc_prompt(open_items, completed_items)
-    logger.info(f"Sending {len(prompt):,} chars to Azure OpenAI for QC analysis…")
+    prompt = build_qc_prompt(focus_items, other_open_items, completed_items)
+    logger.info(f"[{project}] Sending {len(prompt):,} chars to Azure OpenAI…")
 
     response = client.chat.completions.create(
         model=AZURE_MODEL,
@@ -253,7 +274,7 @@ def run_analysis(open_items, completed_items):
     )
 
     raw = response.choices[0].message.content
-    logger.info(f"Received {len(raw):,} chars from Azure OpenAI.")
+    logger.info(f"[{project}] Received {len(raw):,} chars from Azure OpenAI.")
 
     try:
         data = json.loads(raw)
@@ -264,8 +285,8 @@ def run_analysis(open_items, completed_items):
 
     findings = data.get("findings", [])
     summary  = data.get("summary", "")
-    logger.info(f"QC summary: {summary}")
-    logger.info(f"Findings returned: {len(findings)}")
+    logger.info(f"[{project}] {summary}")
+    logger.info(f"[{project}] Findings: {len(findings)}")
     return findings
 
 
@@ -326,25 +347,59 @@ def run_qc(lookback_days=LOOKBACK_DAYS):
     """
     Main entry point for external callers (e.g. PunchlistCommander).
 
+    Runs one focused Azure OpenAI pass per project so the model has a clear
+    target set rather than one giant undifferentiated list.  Cross-project
+    duplicate findings are deduplicated across passes by item-pair.
+
     Returns:
         (findings, items_by_id)
-        findings    — list of finding dicts from run_analysis()
+        findings    — list of finding dicts, deduplicated across all passes
         items_by_id — dict mapping PunchlistItemID -> open item dict
     """
     conn = get_connection()
     try:
-        open_items      = get_open_items(conn)
+        all_open        = get_open_items(conn)
         completed_items = get_completed_items(conn, lookback_days)
     finally:
         conn.close()
 
     logger.info(
-        f"Loaded {len(open_items)} open item(s), "
+        f"Loaded {len(all_open)} open item(s), "
         f"{len(completed_items)} completed item(s) in last {lookback_days} days."
     )
-    findings    = run_analysis(open_items, completed_items)
-    items_by_id = {item['id']: item for item in open_items}
-    return findings, items_by_id
+
+    # Group open items by project for focused per-project passes
+    by_project = {}
+    for item in all_open:
+        by_project.setdefault(item['project'], []).append(item)
+
+    all_findings = []
+    seen_pairs   = set()   # dedup duplicate findings found from both sides
+    seen_singles = set()   # dedup already_done / stale by item_id
+
+    for project, focus_items in sorted(by_project.items()):
+        other_open = [i for i in all_open if i['project'] != project]
+        findings   = run_analysis(focus_items, other_open, completed_items)
+
+        for f in findings:
+            ftype   = f.get('type')
+            item_id = f.get('item_id')
+
+            if ftype == 'duplicate':
+                pair = frozenset({item_id, f.get('related_item_id')})
+                if pair in seen_pairs:
+                    continue
+                seen_pairs.add(pair)
+            else:
+                if item_id in seen_singles:
+                    continue
+                seen_singles.add(item_id)
+
+            all_findings.append(f)
+
+    logger.info(f"Total findings after dedup: {len(all_findings)}")
+    items_by_id = {item['id']: item for item in all_open}
+    return all_findings, items_by_id
 
 
 # =============================================================================

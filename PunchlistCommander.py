@@ -1658,7 +1658,7 @@ class PunchlistCommander(tk.Tk):
             )
             return
 
-        self.status_var.set("Running QC analysis… (this may take 30–60 seconds)")
+        self.status_var.set("Running QC analysis… (one pass per project — may take 2–3 minutes)")
 
         def _worker():
             try:
