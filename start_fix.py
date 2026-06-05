@@ -680,6 +680,9 @@ def launch_claude_code_interactive(project_dir, brief_path):
 
     A tiny .bat is written to TEMP_DIR and launched, which avoids Windows
     nested-quoting problems with paths that contain spaces.
+
+    Prefers Windows Terminal (wt.exe) for modern copy/paste (Ctrl-Shift-C/V,
+    copy-on-select); falls back to a classic cmd console if wt isn't present.
     """
     os.makedirs(TEMP_DIR, exist_ok=True)
     pointer = _pointer_prompt(brief_path)
@@ -692,11 +695,15 @@ def launch_claude_code_interactive(project_dir, brief_path):
         f.write(f'cd /d "{project_dir}"\r\n')
         f.write(f'{CLAUDE_CMD} "{pointer}"\r\n')
 
-    # 'start' opens a new window; first quoted token is the window title.
-    subprocess.Popen(
-        f'start "Start Fix - Claude Code" cmd /k "{bat_path}"',
-        shell=True
-    )
+    if shutil.which("wt"):
+        # Windows Terminal: --title sets the tab name; cmd /k runs the bat
+        # and keeps the pane open after Claude Code exits.
+        launch = f'wt.exe --title "Start Fix - Claude Code" cmd /k "{bat_path}"'
+    else:
+        # Fallback: classic cmd console via 'start' (first quoted token = title).
+        launch = f'start "Start Fix - Claude Code" cmd /k "{bat_path}"'
+
+    subprocess.Popen(launch, shell=True)
     logger.info(f"Launched interactive Claude Code via {bat_path}")
     return bat_path
 
