@@ -369,6 +369,21 @@ class PunchlistApp:
         self.priority_combo.pack(side=tk.LEFT, padx=(0, 12))
         self.priority_combo.bind('<<ComboboxSelected>>', lambda e: self.refresh_data())
 
+        # Search box — live, case-insensitive substring filter over Title + Description.
+        # Applied in-memory by _populate_tree() so typing never hits the database.
+        tk.Label(filter_frame, text="Search:", bg=COLORS['bg'],
+                 font=('Segoe UI', 9)).pack(side=tk.LEFT, padx=(0, 3))
+        self.search_var = tk.StringVar()
+        self.search_entry = tk.Entry(
+            filter_frame, textvariable=self.search_var,
+            font=('Segoe UI', 9), width=24
+        )
+        self.search_entry.pack(side=tk.LEFT, padx=(0, 2))
+        self.search_entry.bind('<KeyRelease>', lambda e: self._populate_tree())
+        self.search_entry.bind('<Escape>', lambda e: self._clear_search())
+        self._make_button(filter_frame, "✕", self._clear_search,
+                          COLORS['btn_warning']).pack(side=tk.LEFT, padx=(0, 12))
+
         # Refresh button
         self._make_button(filter_frame, "Refresh", self.refresh_data,
                           COLORS['btn_primary']).pack(side=tk.LEFT, padx=5)
@@ -437,7 +452,8 @@ class PunchlistApp:
         self.tree.bind('<<TreeviewSelect>>', self._on_item_select)
 
         # Store full item data
-        self.item_data = {}
+        self.item_data = {}       # iid -> item dict for items currently shown
+        self.all_items = []       # last SQL fetch, before the in-memory search filter
 
     # -----------------------------------------------------------------
     # DETAIL / EDIT PANEL
@@ -648,34 +664,32 @@ class PunchlistApp:
     # -----------------------------------------------------------------
     # DATA LOADING
     # -----------------------------------------------------------------
-    def refresh_data(self):
-        """Reload items from SQL and refresh the treeview."""
-        self._set_status("Loading...")
-        self._clear_detail()
+    def _clear_search(self, *_):
+        """Empty the search box and re-render the full (SQL-filtered) list."""
+        self.search_var.set('')
+        self._populate_tree()
+        self.search_entry.focus_set()
 
-        # Update project filter dropdown
-        try:
-            projects = fetch_distinct_projects()
-            self.project_combo['values'] = ['(All)'] + projects
-            self.detail_project['values'] = projects
-        except Exception as e:
-            messagebox.showerror("Database Error", f"Could not connect:\n{e}")
-            return
-
-        # Fetch filtered data
-        items = fetch_all_items(
-            project_filter=self.project_var.get(),
-            status_filter=self.status_var.get(),
-            priority_filter=self.priority_var.get()
-        )
+    def _populate_tree(self):
+        """
+        Rebuild the treeview from self.all_items, applying the live search
+        text as a case-insensitive substring match over Title + Description.
+        Runs entirely in memory — no database round-trip.
+        """
+        query = self.search_var.get().strip().lower()
 
         # Clear tree
         for child in self.tree.get_children():
             self.tree.delete(child)
         self.item_data.clear()
 
-        # Populate
-        for i, item in enumerate(items):
+        shown = 0
+        for item in self.all_items:
+            if query:
+                haystack = f"{item.get('Title') or ''}\n{item.get('Description') or ''}".lower()
+                if query not in haystack:
+                    continue
+
             item_id = item['PunchlistItemID']
             self.item_data[str(item_id)] = item
 
@@ -690,7 +704,7 @@ class PunchlistApp:
             elif item['Priority'] == 'High':
                 tags.append('high')
 
-            if i % 2 == 1:
+            if shown % 2 == 1:
                 tags.append('stripe')
 
             self.tree.insert('', tk.END, iid=str(item_id), values=(
@@ -703,8 +717,36 @@ class PunchlistApp:
                 self._fmt_date(item.get('LastModifiedDate')),
                 item['BlockedBy'] or ''
             ), tags=tuple(tags))
+            shown += 1
 
-        self.count_label.config(text=f"{len(items)} items shown")
+        if query:
+            self.count_label.config(text=f"{shown} of {len(self.all_items)} items shown")
+        else:
+            self.count_label.config(text=f"{shown} items shown")
+
+    def refresh_data(self):
+        """Reload items from SQL and refresh the treeview."""
+        self._set_status("Loading...")
+        self._clear_detail()
+
+        # Update project filter dropdown
+        try:
+            projects = fetch_distinct_projects()
+            self.project_combo['values'] = ['(All)'] + projects
+            self.detail_project['values'] = projects
+        except Exception as e:
+            messagebox.showerror("Database Error", f"Could not connect:\n{e}")
+            return
+
+        # Fetch filtered data (dropdown filters are applied at the SQL level)
+        self.all_items = fetch_all_items(
+            project_filter=self.project_var.get(),
+            status_filter=self.status_var.get(),
+            priority_filter=self.priority_var.get()
+        )
+
+        # Render (applies the in-memory search filter on top of the SQL result)
+        self._populate_tree()
 
         # Update status bar
         try:

@@ -628,7 +628,8 @@ class PunchlistCommander(tk.Tk):
         # State
         self.grouped_items = {}              # from get_open_items_grouped()
         self.checked_item_ids = set()        # set of int IDs currently checked
-        self.tree_node_to_item = {}          # tree iid -> item dict
+        self.tree_node_to_item = {}          # tree iid -> item dict (visible rows)
+        self.items_by_id = {}                # item id -> item dict (all loaded items)
         self.current_detail_item = None      # item shown in detail pane
         self._start_fix_busy = False         # guards against concurrent runs
         self._btn_start_fix = None           # detail-pane Start Fix button ref
@@ -656,6 +657,26 @@ class PunchlistCommander(tk.Tk):
             bg=COLORS['header_bg'], fg=COLORS['header_fg']
         )
         title.pack(side=tk.LEFT, padx=10)
+
+        # Search box — live, case-insensitive substring filter over title +
+        # description. Applied in-memory by _rebuild_tree(); no DB round-trip.
+        tk.Label(
+            bar, text="Search:", bg=COLORS['header_bg'], fg=COLORS['header_fg'],
+            font=('Segoe UI', 9)
+        ).pack(side=tk.LEFT, padx=(15, 3))
+        self.search_var = tk.StringVar()
+        self.search_entry = tk.Entry(
+            bar, textvariable=self.search_var, font=('Segoe UI', 9), width=28
+        )
+        self.search_entry.pack(side=tk.LEFT, pady=8)
+        self.search_entry.bind('<KeyRelease>', lambda e: self._rebuild_tree())
+        self.search_entry.bind('<Escape>', lambda e: self._clear_search())
+        tk.Button(
+            bar, text="✕", command=self._clear_search,
+            bg=COLORS['header_bg'], fg=COLORS['header_fg'],
+            activebackground='#34495e', activeforeground=COLORS['header_fg'],
+            bd=0, padx=6, font=('Segoe UI', 9, 'bold')
+        ).pack(side=tk.LEFT, padx=(2, 0), pady=8)
 
         # Right-side buttons
         btn_settings = tk.Button(
@@ -927,8 +948,21 @@ class PunchlistCommander(tk.Tk):
     # Tree population
     # -------------------------------------------------------------------------
 
+    def _matches_search(self, item, query):
+        """Case-insensitive substring match over an item's title + description."""
+        if not query:
+            return True
+        haystack = f"{item.get('title') or ''}\n{item.get('description') or ''}".lower()
+        return query in haystack
+
+    def _clear_search(self, *_):
+        """Empty the search box and re-render from cached data."""
+        self.search_var.set('')
+        self._rebuild_tree()
+        self.search_entry.focus_set()
+
     def refresh_tree(self):
-        """Reload from SQL and rebuild the tree."""
+        """Reload from SQL, then render (applying the current search filter)."""
         try:
             self.grouped_items = get_open_items_grouped()
         except Exception as e:
@@ -936,9 +970,28 @@ class PunchlistCommander(tk.Tk):
             messagebox.showerror("Database error",
                                  f"Could not load items:\n{e}")
             return
+        self._rebuild_tree()
 
-        # Preserve check state across refresh by item_id
+    def _rebuild_tree(self):
+        """
+        Rebuild the tree from self.grouped_items, applying the live search
+        text as a case-insensitive substring match over title + description.
+        Projects/priorities with no matching items are omitted. Runs entirely
+        in memory — no database round-trip.
+        """
+        query = self.search_var.get().strip().lower()
+
+        # Preserve check state across rebuild by item_id
         existing_checked = set(self.checked_item_ids)
+
+        # Full id -> item map across ALL loaded items (not just visible rows),
+        # so checks and launches survive an active search filter.
+        self.items_by_id = {
+            it['id']: it
+            for pri_groups in self.grouped_items.values()
+            for items in pri_groups.values()
+            for it in items
+        }
 
         # Clear
         for iid in self.tree.get_children():
@@ -946,10 +999,24 @@ class PunchlistCommander(tk.Tk):
         self.tree_node_to_item.clear()
 
         total_items = 0
+        shown_projects = 0
         for project in sorted(self.grouped_items.keys(), key=str.lower):
             pri_groups = self.grouped_items[project]
-            project_count = sum(len(v) for v in pri_groups.values())
+
+            # Filter each priority group first so empty projects/priorities
+            # can be skipped when a search is active.
+            filtered = {}
+            for pri in ('High', 'Medium', 'Low'):
+                matches = [it for it in pri_groups.get(pri, [])
+                           if self._matches_search(it, query)]
+                if matches:
+                    filtered[pri] = matches
+            if not filtered:
+                continue
+
+            project_count = sum(len(v) for v in filtered.values())
             total_items += project_count
+            shown_projects += 1
 
             proj_node = self.tree.insert(
                 '', 'end',
@@ -960,7 +1027,7 @@ class PunchlistCommander(tk.Tk):
             )
 
             for pri in ('High', 'Medium', 'Low'):
-                items = pri_groups.get(pri, [])
+                items = filtered.get(pri, [])
                 if not items:
                     continue
                 pri_icon = {'High': '🔴', 'Medium': '🟡', 'Low': '🟢'}[pri]
@@ -993,15 +1060,23 @@ class PunchlistCommander(tk.Tk):
                     )
                     self.tree_node_to_item[iid] = item
 
-        # Sync checked set to only IDs still present
-        present_ids = {it['id'] for it in self.tree_node_to_item.values()}
-        self.checked_item_ids = {i for i in existing_checked if i in present_ids}
+        # Sync checked set to only IDs still present in the loaded data.
+        # Use the FULL set (not just rows currently shown) so an active search
+        # filter doesn't silently uncheck items it merely hides.
+        self.checked_item_ids = {i for i in existing_checked if i in self.items_by_id}
 
         self._update_launch_button()
-        self.status_var.set(
-            f"Loaded {total_items} active item(s) across "
-            f"{len(self.grouped_items)} project(s)."
-        )
+        if query:
+            self.status_var.set(
+                f"Showing {total_items} item(s) matching "
+                f"“{self.search_var.get().strip()}” "
+                f"across {shown_projects} project(s)."
+            )
+        else:
+            self.status_var.set(
+                f"Loaded {total_items} active item(s) across "
+                f"{len(self.grouped_items)} project(s)."
+            )
 
     # -------------------------------------------------------------------------
     # Tree event handlers
@@ -1244,9 +1319,10 @@ class PunchlistCommander(tk.Tk):
         """Launch every checked item in Chrome."""
         if not self.checked_item_ids:
             return
-        # Resolve item dicts
-        items = [it for it in self.tree_node_to_item.values()
-                 if it['id'] in self.checked_item_ids]
+        # Resolve item dicts from the full map so checked items that are
+        # currently hidden by the search filter still launch.
+        items = [self.items_by_id[i] for i in self.checked_item_ids
+                 if i in self.items_by_id]
         if not items:
             return
 
