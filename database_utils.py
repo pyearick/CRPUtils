@@ -67,14 +67,12 @@ def get_sqlalchemy_engine_BIWarehouse():
     return create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
 
 
-def get_sqlalchemy_engine_Pricebooks():
-    params = urllib.parse.quote_plus(
-        "DRIVER={ODBC Driver 17 for SQL Server};"
-        "SERVER=BI-SQL001;"
-        "DATABASE=Pricebooks;"
-        "Trusted_Connection=yes;"
-    )
-    return create_engine(f"mssql+pyodbc:///?odbc_connect={params}")
+# PLM-058: get_sqlalchemy_engine_Pricebooks() (local [Pricebooks] subscriber DB on
+# BI-SQL001) was removed. The subscriber's snapshot replication fails often; OE
+# pricebook data is now served from CRPAF.dbo.OEPriceBookPBI (refreshed directly
+# from the CRPREPORTS\BI publisher). Read OEPriceBookPBI via get_sqlalchemy_engine().
+# get_sqlalchemy_engine_CRPREPORTSPricebooks() below still reaches the source publisher
+# if a direct read is ever needed.
 
 
 def get_sqlalchemy_engine_CRPREPORTSPricebooks():
@@ -116,7 +114,6 @@ def main():
         'default': get_sqlalchemy_engine(),
         'PLM': get_sqlalchemy_engine_PLM(),
         'BIWarehouse': get_sqlalchemy_engine_BIWarehouse(),
-        'Pricebooks': get_sqlalchemy_engine_Pricebooks(),
         'CRPREPORTSPricebooks': get_sqlalchemy_engine_CRPREPORTSPricebooks()
     }
 
