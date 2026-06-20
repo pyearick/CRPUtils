@@ -288,32 +288,55 @@ def extract_cross_project_imports(imports: List[str], project_name: str) -> List
     return sorted(cross)
 
 
+# Identifiers that are databases or schemas, never actual tables. Used to keep
+# qualified names like [BIWarehouse].[dbo].[Foo] from emitting the db/schema as
+# a phantom "table" that every project appears to share.
+_NON_TABLE_TOKENS = {
+    'dbo', 'sys', 'information_schema', 'guest',
+    'biwarehouse', 'crpaf', 'pricebooks', 'master', 'tempdb', 'model', 'msdb',
+}
+_SQL_NOISE = {
+    'select', 'where', 'and', 'or', 'not', 'null', 'on', 'as',
+    'inner', 'left', 'right', 'outer', 'cross', 'join', 'group', 'order',
+}
+
+# A table reference must carry a real SQL signal so we never mistake Python's
+# own `from X import Y` for a table read. Two accepted shapes, both capturing
+# the LAST (table) segment and discarding any db/schema prefix:
+#   _BRACKETED : [db].[schema].[Table] / [schema].[Table] / [Table]  (table is bracketed)
+#   _DBO_QUAL  : db.dbo.Table / dbo.Table                            (dbo-qualified)
+# Bare unbracketed words after FROM/JOIN are NOT matched - that is what caused
+# `from collections import ...` to be logged as a table.
+_BRACKETED = r'(?:\[\w+\]\.){0,2}\[(\w+)\]'
+_DBO_QUAL = r'(?:\w+\.)?dbo\.(\w+)'
+
+
+def _keep_table(name: str) -> bool:
+    low = name.lower()
+    return low not in _SQL_NOISE and low not in _NON_TABLE_TOKENS
+
+
+def _find_tables(content, keyword):
+    """Collect table names after `keyword` (e.g. 'FROM|JOIN'), both SQL shapes."""
+    found = set()
+    for tail in (_BRACKETED, _DBO_QUAL):
+        for match in re.finditer(rf'(?:{keyword})\s+' + tail, content, re.IGNORECASE):
+            t = match.group(1)
+            if _keep_table(t):
+                found.add(t)
+    return found
+
+
 def extract_tables_read(content: str) -> List[str]:
     """
     Extract SQL table names that are READ from.
-    Looks for: SELECT...FROM [schema].[table], pd.read_sql patterns
+    Looks for: FROM/JOIN [db].[schema].[table] or dbo.table, plus read_sql_table.
     """
-    tables = set()
+    tables = _find_tables(content, r'FROM|JOIN')
 
-    # SQL FROM/JOIN patterns: [schema].[dbo].[TableName] or dbo.TableName
-    from_pattern = re.compile(
-        r'(?:FROM|JOIN)\s+'
-        r'(?:\[?\w+\]?\.)?\[?dbo\]?\.\[?(\w+)\]?',
-        re.IGNORECASE
-    )
-    for match in from_pattern.finditer(content):
+    # pandas: read_sql_table("TableName", ...)
+    for match in re.finditer(r'read_sql_table\(\s*["\'](\w+)["\']', content):
         tables.add(match.group(1))
-
-    # Simpler pattern: FROM [TableName] (no schema prefix)
-    simple_from = re.compile(
-        r'(?:FROM|JOIN)\s+\[(\w+)\]',
-        re.IGNORECASE
-    )
-    for match in simple_from.finditer(content):
-        table = match.group(1)
-        # Filter out obvious non-tables
-        if table not in ('SELECT', 'WHERE', 'AND', 'OR', 'NOT', 'NULL'):
-            tables.add(table)
 
     return sorted(tables)
 
@@ -321,24 +344,12 @@ def extract_tables_read(content: str) -> List[str]:
 def extract_tables_written(content: str) -> List[str]:
     """
     Extract SQL table names that are WRITTEN to.
-    Looks for: INSERT INTO, UPDATE, to_sql, MERGE INTO, TRUNCATE TABLE, DELETE FROM
+    Looks for: INSERT INTO, UPDATE, to_sql, MERGE INTO, TRUNCATE TABLE, DELETE FROM.
     """
-    tables = set()
-
-    # INSERT INTO / MERGE INTO / DELETE FROM / UPDATE / TRUNCATE TABLE
-    write_pattern = re.compile(
-        r'(?:INSERT\s+INTO|MERGE\s+INTO|DELETE\s+FROM|UPDATE|TRUNCATE\s+TABLE)\s+'
-        r'(?:\[?\w+\]?\.)?\[?dbo\]?\.\[?(\w+)\]?',
-        re.IGNORECASE
-    )
-    for match in write_pattern.finditer(content):
+    tables = _find_tables(
+        content, r'INSERT\s+INTO|MERGE\s+INTO|DELETE\s+FROM|UPDATE|TRUNCATE\s+TABLE')
+    for match in re.finditer(r'\.to_sql\(\s*["\'](\w+)["\']', content):
         tables.add(match.group(1))
-
-    # pandas to_sql: .to_sql("TableName", ...) or .to_sql('TableName', ...)
-    to_sql_pattern = re.compile(r'\.to_sql\(\s*["\'](\w+)["\']')
-    for match in to_sql_pattern.finditer(content):
-        tables.add(match.group(1))
-
     return sorted(tables)
 
 
@@ -878,9 +889,13 @@ def build_cross_reference(inventories: Dict[str, ProjectInventory]) -> CrossRefe
         for table in inv.all_tables_written:
             xref.table_writers.setdefault(table, []).append(proj_name)
 
-        # Track import graph
+        # Track import graph - only edges to projects actually in the roster.
+        # (A denylist upstream can't catch every pip package, so filter here:
+        #  an import counts as cross-project only if it resolves to a real one.)
         if inv.all_cross_imports:
-            xref.import_graph[proj_name] = inv.all_cross_imports
+            known = sorted(d for d in inv.all_cross_imports if d in inventories)
+            if known:
+                xref.import_graph[proj_name] = known
 
     # Build shared tables map (tables touched by 2+ projects)
     all_tables = set(xref.table_readers.keys()) | set(xref.table_writers.keys())
@@ -1007,8 +1022,9 @@ def generate_project_prompt(inventory: ProjectInventory,
 
     # --- Section 4: Cross-Project Connections ---
     lines.append("## CROSS-PROJECT CONNECTIONS")
-    if inventory.all_cross_imports:
-        lines.append(f"This project imports from: {', '.join(sorted(inventory.all_cross_imports))}")
+    _imports_clean = xref.import_graph.get(proj, [])
+    if _imports_clean:
+        lines.append(f"This project imports from: {', '.join(sorted(_imports_clean))}")
 
     # Who imports from us?
     importers = [p for p, deps in xref.import_graph.items()
@@ -1414,6 +1430,12 @@ def run_full_analysis(project_folders: List[str],
     step += 1
     progress("Building cross-project analysis...", int(step / total_steps * 100))
     xref = build_cross_reference(inventories)
+    with open(os.path.join(output_dir, "xref.json"), "w", encoding="utf-8") as f:
+         json.dump({
+         "table_readers": xref.table_readers,
+         "table_writers": xref.table_writers,
+         "import_graph":  xref.import_graph,
+    }, f, indent=2, default=list)
 
     # --- Phase 4: Generate outputs ---
     step += 1
