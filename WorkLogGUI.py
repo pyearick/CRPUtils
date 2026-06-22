@@ -7,10 +7,14 @@ a timeline of what was worked on during a given month. Designed to
 support invoicing by combining:
 
   1. File modification timestamps from PycharmProjects and SSMS folders
-  2. PMA_PunchlistItems date activity (Created, Modified, Completed)
-  3. Session clustering with estimated durations
+  2. Claude Code StartFix briefs from C:\\Temp\\StartFix (project + start
+     time parsed from the filename) - usually the first action on a task
+  3. PMA_PunchlistItems date activity (Created, Modified, Completed)
+  4. Session clustering with estimated durations
 
-Exports to xlsx with three sheets: Sessions, File Activity, Punchlist Activity.
+Exports to xlsx with four sheets: Sessions, Start Fixes, File Activity,
+Punchlist Activity. The Sessions sheet is the combined timeline - file
+edits and StartFix events from all sources clustered into work sessions.
 
 Lives in: CRPUtils folder
 Output:   WorkLog_YYYY-MM.xlsx in CRPUtils folder
@@ -20,6 +24,7 @@ Created: March 2026
 """
 
 import os
+import re
 import sys
 import tkinter as tk
 from tkinter import ttk, messagebox
@@ -46,6 +51,17 @@ SKIP_FOLDERS = {
     '.idea', '.git', '.venv', '__pycache__', 'node_modules',
     'CommitsGH', '.ipynb_checkpoints', '.venvBISQL001', 'Archive'
 }
+
+# Claude Code StartFix briefs land here, named:
+#   {Project}_StartFix_{YYYYMMDD}_{HHMMSS}.md
+# The project and exact start time are parsed from the filename. The regex
+# anchors on "_StartFix_" so project names containing underscores (e.g.
+# eBayWT_NF) are captured intact.
+STARTFIX_DIR = r"C:\Temp\StartFix"
+STARTFIX_RE = re.compile(
+    r'^(?P<project>.+)_StartFix_(?P<date>\d{8})_(?P<time>\d{6})\.md$',
+    re.IGNORECASE
+)
 
 # Files modified within this many minutes of each other = same session
 SESSION_GAP_MINUTES = 30
@@ -135,6 +151,68 @@ def _check_file(filepath, start, end, source, project, results):
             })
     except (OSError, ValueError):
         pass
+
+
+def scan_startfix(year, month):
+    """
+    Scan C:\\Temp\\StartFix for Claude Code StartFix briefs created in the
+    given month. The filename encodes both the project and the exact start
+    timestamp, so each brief is an accurately project-attributed "work
+    started" marker.
+
+    Returns event dicts shaped like scan_files() output (source='StartFix',
+    project parsed from the name, 'modified' = parsed start time) so they
+    fold straight into session clustering and the File Activity sheet.
+    Falls back to file mtime if a name parses oddly.
+    """
+    from calendar import monthrange
+    start = datetime(year, month, 1)
+    _, last_day = monthrange(year, month)
+    end = datetime(year, month, last_day, 23, 59, 59)
+
+    base = Path(STARTFIX_DIR)
+    results = []
+    if not base.exists():
+        logger.warning(f"StartFix directory not found: {STARTFIX_DIR}")
+        return results
+
+    for f in base.iterdir():
+        if not f.is_file():
+            continue
+        m = STARTFIX_RE.match(f.name)
+        if not m:
+            continue
+
+        try:
+            started = datetime.strptime(
+                m.group('date') + m.group('time'), '%Y%m%d%H%M%S'
+            )
+        except ValueError:
+            try:
+                started = datetime.fromtimestamp(f.stat().st_mtime)
+            except (OSError, ValueError):
+                continue
+
+        if not (start <= started <= end):
+            continue
+
+        try:
+            size_kb = round(f.stat().st_size / 1024, 1)
+        except OSError:
+            size_kb = 0.0
+
+        results.append({
+            'source': 'StartFix',
+            'project': m.group('project'),
+            'filename': f.name,
+            'modified': started,
+            'size_kb': size_kb,
+            'extension': '.md',
+        })
+
+    results.sort(key=lambda r: r['modified'])
+    logger.info(f"StartFix scan: {len(results)} briefs in {year}-{month:02d}")
+    return results
 
 
 def fetch_punchlist_activity(year, month):
@@ -249,8 +327,8 @@ def _finalize_session(session_data):
 # XLSX EXPORT
 # =============================================================================
 
-def export_xlsx(year, month, sessions, file_results, punchlist_items):
-    """Write the three-sheet workbook."""
+def export_xlsx(year, month, sessions, file_results, punchlist_items, startfix_events):
+    """Write the four-sheet workbook."""
     from openpyxl import Workbook
     from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 
@@ -302,7 +380,23 @@ def export_xlsx(year, month, sessions, file_results, punchlist_items):
         for col in range(1, 11):
             ws_sessions.cell(row=row_idx, column=col).border = thin_border
 
-    # --- Sheet 2: File Activity ---
+    # --- Sheet 2: Start Fixes ---
+    ws_sf = wb.create_sheet("Start Fixes")
+
+    sf_headers = ['Date', 'Time', 'Project', 'Brief File']
+    sf_widths = [12, 8, 24, 60]
+    style_header(ws_sf, sf_headers, sf_widths)
+
+    for row_idx, e in enumerate(startfix_events, 2):
+        ws_sf.cell(row=row_idx, column=1, value=e['modified'].strftime('%Y-%m-%d')).font = data_font
+        ws_sf.cell(row=row_idx, column=2, value=e['modified'].strftime('%H:%M')).font = data_font
+        ws_sf.cell(row=row_idx, column=3, value=e['project']).font = data_font
+        ws_sf.cell(row=row_idx, column=4, value=e['filename']).font = data_font
+
+        for col in range(1, 5):
+            ws_sf.cell(row=row_idx, column=col).border = thin_border
+
+    # --- Sheet 3: File Activity ---
     ws_files = wb.create_sheet("File Activity")
 
     file_headers = ['Modified', 'Source', 'Project', 'Filename', 'Extension', 'Size (KB)']
@@ -322,7 +416,7 @@ def export_xlsx(year, month, sessions, file_results, punchlist_items):
         for col in range(1, 7):
             ws_files.cell(row=row_idx, column=col).border = thin_border
 
-    # --- Sheet 3: Punchlist Activity ---
+    # --- Sheet 4: Punchlist Activity ---
     ws_punch = wb.create_sheet("Punchlist Activity")
 
     punch_headers = [
@@ -483,22 +577,30 @@ class WorkLogApp:
             self._set_status(f"Scanning files for {month_label}...")
             file_results = scan_files(year, month)
 
-            # Step 2: Query punchlist
+            # Step 2: Scan Claude Code StartFix briefs, fold into the timeline
+            self._set_status(f"Scanning StartFix briefs for {month_label}...")
+            startfix_events = scan_startfix(year, month)
+            file_results.extend(startfix_events)
+            file_results.sort(key=lambda r: r['modified'])
+
+            # Step 3: Query punchlist
             self._set_status(f"Querying punchlist activity for {month_label}...")
             punchlist_items = fetch_punchlist_activity(year, month)
 
-            # Step 3: Cluster sessions
+            # Step 4: Cluster sessions (now includes StartFix events)
             self._set_status("Clustering work sessions...")
             sessions = cluster_sessions(file_results)
 
-            # Step 4: Export
+            # Step 5: Export
             self._set_status("Writing xlsx...")
-            output_path = export_xlsx(year, month, sessions, file_results, punchlist_items)
+            output_path = export_xlsx(year, month, sessions, file_results,
+                                      punchlist_items, startfix_events)
 
             summary = (
                 f"Exported: {os.path.basename(output_path)}\n"
                 f"Sessions: {len(sessions)}  |  "
                 f"Files: {len(file_results)}  |  "
+                f"Start Fixes: {len(startfix_events)}  |  "
                 f"Punchlist items: {len(punchlist_items)}"
             )
             self._set_status(summary)
