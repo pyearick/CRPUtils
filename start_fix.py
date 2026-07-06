@@ -24,7 +24,7 @@ What it reuses (all live alongside this file in the CRPUtils folder):
 
 Pieces:
   1. build_pdoc            - refresh pdoc_<project>.xml
-  2. run_project_analyzer  - run ProjectAnalyzer for one project, get its prompt
+  2. get_roster_analysis   - run ProjectAnalyzer across the full roster (cached)
   3. assemble_start_fix_prompt - punchlist item + siblings + cross-refs
                                   + synopsis + inventory -> one brief
   4. launch_claude_code    - hand the brief to Claude Code (interactive or -p)
@@ -48,6 +48,8 @@ import argparse
 import subprocess
 from pathlib import Path
 from datetime import datetime
+import json, threading, time
+from blast_radius import compute_blast_radius, render_blast_radius
 
 import pyodbc
 
@@ -66,8 +68,18 @@ LOG_FILE = r"C:/Logs/StartFix.log"
 # NON-OneDrive path so regenerating them every run does not thrash sync.
 TEMP_DIR = r"C:/Temp/StartFix"
 
-# The Claude Code CLI command. Override here if 'claude' is not on PATH.
-CLAUDE_CMD = "claude"
+# The Claude Code CLI command. Pinned to the full path of the npm-installed
+# claude.cmd shim so Start Fix does not depend on PATH (a self-updater once
+# left the binary missing from PATH, which broke launches). If you reinstall
+# elsewhere, update this - 'where claude' in cmd prints the current path.
+CLAUDE_CMD = r"C:\Users\pyearick.CRP\AppData\Roaming\npm\claude.cmd"
+
+# Path to ConEmu64.exe - the preferred terminal for interactive Start Fix
+# sessions (proper copy/paste, resizing, scrollback - unlike a raw cmd console).
+# Leave as None to auto-detect (PATH + common install locations). Set to a full
+# path to override, e.g. a portable / unzipped build:
+#   CONEMU_CMD = r"C:/Tools/ConEmuPack/ConEmu64.exe"
+CONEMU_CMD = None
 
 # Tools Claude Code is allowed to use in HEADLESS (Refresh Synopsis) runs.
 # Interactive Start Fix sessions are not scoped here - you approve in person.
@@ -369,64 +381,6 @@ def build_pdoc(project_dir):
 # STEP 2 - PROJECT ANALYZER
 # =============================================================================
 
-def run_project_analyzer(project):
-    """
-    Run ProjectAnalyzer for a single project and return its analysis prompt
-    text (the script inventory + cross-project connections + related SSMS).
-
-    ProjectAnalyzer is imported and called directly - it lives in CRPUtils
-    alongside this file. Returns the prompt text, or None on failure.
-    """
-    try:
-        from ProjectAnalyzer import run_full_analysis, load_config
-    except ImportError as e:
-        logger.error(f"Could not import ProjectAnalyzer: {e}")
-        return None
-
-    try:
-        config = load_config()
-        output_dir = run_full_analysis(
-            project_folders=[project],
-            pycharm_root=config['pycharm_root'],
-            ssms_root=config.get('ssms_root'),
-            selected_jobs=[],            # SSMS auto-associates; jobs left empty
-            output_root=config.get('output_root'),
-        )
-    except Exception as e:
-        logger.error(f"ProjectAnalyzer run failed for {project}: {e}")
-        return None
-
-    # The per-project prompt lands in <output_dir>/Prompts/.
-    prompts_dir = os.path.join(output_dir, "Prompts")
-    if not os.path.isdir(prompts_dir):
-        logger.error(f"ProjectAnalyzer produced no Prompts folder: {prompts_dir}")
-        return None
-
-    candidates = glob.glob(os.path.join(prompts_dir, "*.md"))
-    if not candidates:
-        logger.error(f"No prompt file found in {prompts_dir}")
-        return None
-
-    # Prefer the file whose name contains the project name; else take the
-    # only one (single-project run produces a single prompt).
-    chosen = None
-    for path in candidates:
-        if project.lower() in os.path.basename(path).lower():
-            chosen = path
-            break
-    if chosen is None:
-        chosen = candidates[0]
-
-    try:
-        with open(chosen, 'r', encoding='utf-8', errors='replace') as f:
-            text = f.read()
-        logger.info(f"ProjectAnalyzer prompt read: {chosen}")
-        return text
-    except Exception as e:
-        logger.error(f"Could not read prompt file {chosen}: {e}")
-        return None
-
-
 def extract_inventory_sections(analyzer_prompt):
     """
     Strip the synopsis-generation scaffolding from ProjectAnalyzer's prompt,
@@ -522,15 +476,158 @@ def read_synopsis(project_dir, project):
 # STEP 3 - PROMPT ASSEMBLY
 # =============================================================================
 
-def assemble_start_fix_prompt(context, synopsis, inventory_text,
-                              project, project_dir, pdoc_path):
+def condense_inventory(inventory_text, keep_tables=True):
     """
-    Build the Start Fix brief - one markdown document combining the punchlist
-    neighborhood, the project synopsis, and the ProjectAnalyzer inventory.
+    Shrink ProjectAnalyzer's SCRIPT INVENTORY section to a purpose digest.
+
+    The raw inventory emits ~7 lines per script (filename, line count, modified
+    date, entry-point flag, argparse flag, purpose, table reads/writes, imports).
+    For orienting a fix, the purpose line and the entry-point marker are what
+    earn their tokens; the rest is either re-derivable from source or noise.
+
+    Per script we KEEP:  the `### filename` heading, the **Entry point** marker,
+                         the `- Purpose:` line (and any wrapped continuation),
+                         and - if keep_tables - one compact reads/writes line.
+    Per script we DROP:  Lines/Modified, the argparse flag, and per-script
+                         `Imports from:` (cross-project imports live in the
+                         CROSS-PROJECT CONNECTIONS section, which is preserved).
+
+    Every section OTHER than SCRIPT INVENTORY (SQL files, documentation,
+    cross-project connections, scheduled jobs, NSSM, SSMS) passes through
+    untouched - those are short or carry the cross-project value.
+    """
+    if not inventory_text:
+        return ""
+
+    lines = inventory_text.splitlines()
+    out = []
+
+    in_script_section = False   # between '## SCRIPT INVENTORY' and the next '## '
+    in_block = False            # inside a single '### filename' block
+    keeping_continuation = False  # last kept bullet may wrap onto later lines
+    pending_tables = {}         # collect reads/writes to merge into one line
+
+    def flush_tables():
+        """Emit the merged compact tables line for the block just closed."""
+        if keep_tables and (pending_tables.get("reads") or pending_tables.get("writes")):
+            parts = []
+            if pending_tables.get("reads"):
+                parts.append(f"reads {pending_tables['reads']}")
+            if pending_tables.get("writes"):
+                parts.append(f"writes {pending_tables['writes']}")
+            out.append(f"- Data: {'; '.join(parts)}")
+        pending_tables.clear()
+
+    for line in lines:
+        stripped = line.strip()
+
+        # --- Section boundaries -------------------------------------------------
+        if stripped.startswith("## "):
+            if in_block:
+                flush_tables()
+                in_block = False
+            in_script_section = (stripped == "## SCRIPT INVENTORY")
+            keeping_continuation = False
+            out.append(line)
+            continue
+
+        # Outside the script inventory, pass everything through verbatim.
+        if not in_script_section:
+            out.append(line)
+            continue
+
+        # --- Inside SCRIPT INVENTORY -------------------------------------------
+        if stripped.startswith("### "):
+            # New script block starts; close the previous one's tables line.
+            if in_block:
+                flush_tables()
+            in_block = True
+            keeping_continuation = False
+            out.append(line)
+            continue
+
+        if not in_block:
+            # The 'Total: N code files...' summary and blank lines before the
+            # first script - keep as-is.
+            out.append(line)
+            continue
+
+        # Within a script block, decide bullet by bullet.
+        if stripped.startswith("- Purpose:"):
+            out.append(line)
+            keeping_continuation = True
+            continue
+
+        if stripped.startswith("- **Entry point**"):
+            out.append(line)
+            keeping_continuation = False
+            continue
+
+        if stripped.startswith("- Reads from:"):
+            pending_tables["reads"] = stripped[len("- Reads from:"):].strip()
+            keeping_continuation = False
+            continue
+
+        if stripped.startswith("- Writes to:"):
+            pending_tables["writes"] = stripped[len("- Writes to:"):].strip()
+            keeping_continuation = False
+            continue
+
+        if stripped.startswith("- "):
+            # Lines/Modified, argparse, Imports from: - drop.
+            keeping_continuation = False
+            continue
+
+        if stripped == "":
+            # Blank line ends the block's bullets; emit the tables line, then
+            # preserve the blank as a separator.
+            if in_block:
+                flush_tables()
+            keeping_continuation = False
+            out.append(line)
+            continue
+
+        # A non-bullet, non-blank line: continuation of a multi-line value.
+        if keeping_continuation:
+            out.append(line)
+
+    if in_block:
+        flush_tables()
+
+    # Collapse any runs of 3+ blank lines the trimming may have left behind.
+    cleaned = []
+    blank_run = 0
+    for line in out:
+        if line.strip() == "":
+            blank_run += 1
+            if blank_run <= 1:
+                cleaned.append(line)
+        else:
+            blank_run = 0
+            cleaned.append(line)
+
+    return "\n".join(cleaned).strip()
+
+
+def assemble_start_fix_prompt(context, synopsis, inventory_text,
+                              project, project_dir, pdoc_path,
+                              blast_radius_text=None, xref_path=None):
+    """
+    Build the Start Fix brief - punchlist neighborhood + condensed inventory,
+    with the synopsis referenced on disk rather than embedded.
 
     context        : dict from gather_punchlist_context()
     synopsis       : dict from read_synopsis()
     inventory_text : str from extract_inventory_sections()
+    xref_path      : optional path to the FULL-ROSTER ProjectAnalyzer
+                     CrossReference workbook. The per-item Start Fix run is
+                     single-project and therefore has NO shared tables, so this
+                     must point at the canonical full-roster output (the one
+                     that actually contains the "who uses what data" map), or
+                     be left None to omit the pointer.
+    blast_radius_text : rendered blast-radius markdown for `project` (from
+                     blast_radius.render_blast_radius). Embedded inline - it
+                     is small and central to the task. None omits the section.
     """
     item = context['item']
     lines = []
@@ -593,29 +690,48 @@ def assemble_start_fix_prompt(context, synopsis, inventory_text,
         lines.append("None detected.")
     lines.append("")
 
-    # --- Project background: synopsis ---
+    # --- Project background: synopsis (pointer, not full embed) ---
     lines.append("## Project Background (Synopsis)")
     lines.append("")
     if synopsis['exists'] and synopsis['text']:
+        lines.append(f"A project synopsis is on disk at `{synopsis['path']}` "
+                     "(in this folder). Read it for project history, "
+                     "architecture, and data flow before proposing changes.")
         if synopsis['is_stale']:
-            lines.append("> Note: this synopsis is older than the newest code "
-                         "in the project and may be partially out of date.")
             lines.append("")
-        lines.append(synopsis['text'].strip())
+            lines.append("> Note: this synopsis is older than the newest code "
+                         "in the project and may be partially out of date - "
+                         "weigh the actual source higher where they disagree.")
     else:
         lines.append("(No synopsis on file. Rely on the inventory below and "
                      "the source code.)")
     lines.append("")
 
-    # --- Project inventory ---
+    # --- Blast radius (embedded: small, high-value, task-central) ---
+    if blast_radius_text:
+        lines.append(blast_radius_text.strip())
+        lines.append("")
+
+    # --- Cross-project data ownership (pointer to full-roster workbook) ---
+    if xref_path:
+        lines.append("## Cross-Project Data Ownership")
+        lines.append("")
+        lines.append("For which projects read/write each shared table - the "
+                     "ripple-effect map you can't get from this folder alone - "
+                     f"see the **Shared Tables** sheet in `{xref_path}`. "
+                     "Consult it before changing any table this project writes.")
+        lines.append("")
+
+    # --- Project inventory (condensed purpose digest) ---
     lines.append("## Project Inventory")
     lines.append("")
-    if inventory_text:
-        lines.append("Freshly generated by ProjectAnalyzer. The cross-project "
-                     "connections in particular are information that cannot be "
-                     "derived from this project's folder alone.")
+    condensed = condense_inventory(inventory_text)
+    if condensed:
+        lines.append("Per-script purpose digest from ProjectAnalyzer. Open the "
+                     "actual source for implementation detail; this is for "
+                     "orientation - which file does what.")
         lines.append("")
-        lines.append(inventory_text.strip())
+        lines.append(condensed)
     else:
         lines.append("(Inventory unavailable.)")
     lines.append("")
@@ -673,6 +789,28 @@ def claude_available():
     return shutil.which(CLAUDE_CMD)
 
 
+def _find_conemu():
+    """
+    Resolve the path to ConEmu64.exe, or None if it cannot be found.
+
+    Checks the CONEMU_CMD override first, then PATH, then the usual install
+    locations. ConEmu gives interactive sessions proper copy/paste, resizing
+    and scrollback - much nicer than a raw cmd console.
+    """
+    if CONEMU_CMD:
+        return CONEMU_CMD if os.path.isfile(CONEMU_CMD) else None
+    found = shutil.which("ConEmu64") or shutil.which("ConEmu64.exe")
+    if found:
+        return found
+    for candidate in (
+        r"C:\Program Files\ConEmu\ConEmu64.exe",
+        r"C:\Program Files (x86)\ConEmu\ConEmu64.exe",
+    ):
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
 def launch_claude_code_interactive(project_dir, brief_path):
     """
     Open Claude Code in a new terminal window, in the project folder, seeded
@@ -681,8 +819,8 @@ def launch_claude_code_interactive(project_dir, brief_path):
     A tiny .bat is written to TEMP_DIR and launched, which avoids Windows
     nested-quoting problems with paths that contain spaces.
 
-    Prefers Windows Terminal (wt.exe) for modern copy/paste (Ctrl-Shift-C/V,
-    copy-on-select); falls back to a classic cmd console if wt isn't present.
+    Prefers ConEmu (good copy/paste, resizing, scrollback); falls back to
+    Windows Terminal (wt.exe), then a classic cmd console.
     """
     os.makedirs(TEMP_DIR, exist_ok=True)
     pointer = _pointer_prompt(brief_path)
@@ -695,16 +833,28 @@ def launch_claude_code_interactive(project_dir, brief_path):
         f.write(f'cd /d "{project_dir}"\r\n')
         f.write(f'{CLAUDE_CMD} "{pointer}"\r\n')
 
-    if shutil.which("wt"):
+    conemu = _find_conemu()
+    if conemu:
+        # ConEmu: -Title names the tab. -run must be LAST - ConEmu treats
+        # everything after it as the command line. cmd /k runs the bat and
+        # keeps the pane open after Claude Code exits. The bat lives in
+        # TEMP_DIR (no spaces), so its path quotes cleanly here; any spaces
+        # in project_dir are handled inside the bat by 'cd /d'.
+        launch = (f'"{conemu}" -Title "Start Fix - Claude Code" '
+                  f'-run cmd /k "{bat_path}"')
+        terminal = "ConEmu"
+    elif shutil.which("wt"):
         # Windows Terminal: --title sets the tab name; cmd /k runs the bat
         # and keeps the pane open after Claude Code exits.
         launch = f'wt.exe --title "Start Fix - Claude Code" cmd /k "{bat_path}"'
+        terminal = "Windows Terminal"
     else:
         # Fallback: classic cmd console via 'start' (first quoted token = title).
         launch = f'start "Start Fix - Claude Code" cmd /k "{bat_path}"'
+        terminal = "cmd"
 
     subprocess.Popen(launch, shell=True)
-    logger.info(f"Launched interactive Claude Code via {bat_path}")
+    logger.info(f"Launched interactive Claude Code via {terminal} ({bat_path})")
     return bat_path
 
 
@@ -825,13 +975,7 @@ def start_fix(project, item_ref, dry_run=False):
 
     context = gather_punchlist_context(item)
     pdoc_path = build_pdoc(project_dir)
-    analyzer_prompt = run_project_analyzer(project)
-    inventory_text = extract_inventory_sections(analyzer_prompt)
-    synopsis = read_synopsis(project_dir, project)
-
-    brief = assemble_start_fix_prompt(
-        context, synopsis, inventory_text, project, project_dir, pdoc_path
-    )
+    brief = prepare_start_fix_brief(context, project, project_dir, pdoc_path)
     brief_path = write_brief_file(brief, project, "StartFix")
     result['brief_path'] = brief_path
 
@@ -888,7 +1032,9 @@ def refresh_synopsis(project):
     logger.info(f"Refresh Synopsis: {project}")
 
     build_pdoc(project_dir)
-    analyzer_prompt = run_project_analyzer(project)
+    output_dir = get_roster_analysis(force_refresh=True)
+    analyzer_prompt = (read_full_project_prompt(output_dir, project)
+                       if output_dir else None)
     if not analyzer_prompt:
         result['message'] = "ProjectAnalyzer did not produce a prompt."
         logger.error(result['message'])
@@ -923,6 +1069,189 @@ def refresh_synopsis(project):
             f"Claude Code said: {detail[:600]}")
     logger.info(result['message'])
     return result
+
+
+
+
+WORKBOOK_NAME = "ProjectAnalyzer_CrossReference.xlsx"
+
+# Session cache + lock. Holding the lock across the run means concurrent Start
+# Fixes don't each kick off a roster scan and don't race on the output files -
+# the first one runs it, the rest wait briefly and reuse the result.
+_ROSTER_LOCK = threading.Lock()
+_ROSTER_CACHE = {"output_dir": None, "ran_at": None}
+
+
+def get_roster_analysis(force_refresh=False, max_age_seconds=None):
+    """
+    Run (or reuse) a full-roster ProjectAnalyzer pass and return its output_dir.
+
+    force_refresh    : ignore the cache and run again.
+    max_age_seconds  : if set, a cached run older than this is considered stale
+                       and re-run. None means the session cache never expires
+                       on its own (refresh on demand via force_refresh).
+    """
+    with _ROSTER_LOCK:
+        cached = _ROSTER_CACHE["output_dir"]
+        ran_at = _ROSTER_CACHE["ran_at"]
+        fresh = (
+                cached
+                and os.path.isdir(cached)
+                and not force_refresh
+                and (max_age_seconds is None
+                     or (ran_at and (time.time() - ran_at) < max_age_seconds))
+        )
+        if fresh:
+            logger.info(f"Reusing cached roster analysis: {cached}")
+            return cached
+
+        output_dir = _run_full_roster()
+        if output_dir:
+            _ROSTER_CACHE["output_dir"] = output_dir
+            _ROSTER_CACHE["ran_at"] = time.time()
+        return output_dir
+
+
+def _run_full_roster():
+    """Run ProjectAnalyzer across every project, all SSMS, no scheduled jobs."""
+    try:
+        from ProjectAnalyzer import (run_full_analysis, load_config,
+                                     discover_projects)
+    except ImportError as e:
+        logger.error(f"Could not import ProjectAnalyzer: {e}")
+        return None
+
+    try:
+        config = load_config()
+        projects = discover_projects(config["pycharm_root"])
+        if not projects:
+            logger.error("No projects discovered for roster analysis.")
+            return None
+        output_dir = run_full_analysis(
+            project_folders=projects,
+            pycharm_root=config["pycharm_root"],
+            ssms_root=config.get("ssms_root"),
+            selected_jobs=[],  # SSMS auto-associates by table overlap
+            output_root=config.get("output_root"),
+        )
+        logger.info(f"Roster analysis complete ({len(projects)} projects): "
+                    f"{output_dir}")
+        return output_dir
+    except Exception as e:
+        logger.error(f"Roster analysis failed: {e}")
+        return None
+
+
+def _pick_prompt_file(output_dir, project):
+    """Find this project's prompt within a full-roster run's Prompts folder."""
+    prompts_dir = os.path.join(output_dir, "Prompts")
+    if not os.path.isdir(prompts_dir):
+        logger.error(f"No Prompts folder in roster output: {prompts_dir}")
+        return None
+    candidates = glob.glob(os.path.join(prompts_dir, "*.md"))
+    for path in candidates:
+        if project.lower() in os.path.basename(path).lower():
+            return path
+    logger.warning(f"No prompt file matched project '{project}' in {prompts_dir}")
+    return None
+
+
+def read_full_project_prompt(output_dir, project):
+    """Read this project's UNSTRIPPED prompt (with OUTPUT INSTRUCTIONS) from
+    a full-roster run - used by refresh_synopsis to drive synopsis generation.
+    Returns the full text, or None."""
+    path = _pick_prompt_file(output_dir, project)
+    if not path:
+        return None
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except Exception as e:
+        logger.error(f"Could not read prompt {path}: {e}")
+        return None
+
+
+def _load_xref(output_dir):
+    """Load the persisted cross-project graph. Returns (readers, writers, imports)."""
+    path = os.path.join(output_dir, "xref.json")
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return (data.get("table_readers", {}),
+                data.get("table_writers", {}),
+                data.get("import_graph", {}))
+    except FileNotFoundError:
+        logger.warning(f"xref.json not found in {output_dir} - blast radius "
+                       "unavailable (is run_full_analysis patched?).")
+        return None
+    except Exception as e:
+        logger.error(f"Could not read xref.json: {e}")
+        return None
+
+
+def build_project_slice(output_dir, project):
+    """
+    Slice a full-roster run down to one project's brief inputs.
+
+    Returns a dict:
+        {'inventory_text': str,        # from this project's full-roster prompt
+         'blast_radius_text': str|None,
+         'xref_path': str|None}        # workbook pointer, if present
+    """
+    result = {"inventory_text": "", "blast_radius_text": None, "xref_path": None}
+    if not output_dir or not os.path.isdir(output_dir):
+        return result
+
+    # Inventory: the per-project prompt from a full-roster run already has the
+    # populated cross-project sections, so the same extractor as before works.
+    prompt_path = _pick_prompt_file(output_dir, project)
+    if prompt_path:
+        try:
+            with open(prompt_path, "r", encoding="utf-8", errors="replace") as f:
+                prompt_text = f.read()
+            result["inventory_text"] = extract_inventory_sections(prompt_text)  # noqa: F821
+        except Exception as e:
+            logger.error(f"Could not read prompt {prompt_path}: {e}")
+
+    # Blast radius: computed here from the full graph the roster run persisted.
+    graph = _load_xref(output_dir)
+    if graph:
+        readers, writers, imports = graph
+        blast = compute_blast_radius(readers, writers, imports, project,
+                                     max_hops=2)
+        result["blast_radius_text"] = render_blast_radius(blast)
+
+    # Workbook pointer for table-level drill-down.
+    wb = os.path.join(output_dir, WORKBOOK_NAME)
+    if os.path.isfile(wb):
+        result["xref_path"] = wb
+
+    return result
+
+
+def prepare_start_fix_brief(context, project, project_dir, pdoc_path,
+                            force_refresh=False):
+    """
+    End-to-end: ensure a fresh-enough roster analysis exists, slice this
+    project out of it, and assemble the brief. Drop-in for the old sequence
+    of run_project_analyzer -> extract -> assemble inside run_start_fix.
+    """
+    output_dir = get_roster_analysis(force_refresh=force_refresh)
+    sl = build_project_slice(output_dir, project) if output_dir else \
+        {"inventory_text": "", "blast_radius_text": None, "xref_path": None}
+
+    synopsis = read_synopsis(project_dir, project)  # noqa: F821
+
+    return assemble_start_fix_prompt(  # noqa: F821
+        context=context,
+        synopsis=synopsis,
+        inventory_text=sl["inventory_text"],
+        project=project,
+        project_dir=project_dir,
+        pdoc_path=pdoc_path,
+        blast_radius_text=sl["blast_radius_text"],
+        xref_path=sl["xref_path"],
+    )
 
 
 # =============================================================================

@@ -1,4 +1,5 @@
 import os
+import re
 import datetime
 import json
 import zipfile
@@ -36,6 +37,20 @@ def escape_xml_content(content):
         .replace('"', "&quot;")
         .replace("'", "&apos;")
     )
+
+
+# XML 1.0 forbids most control characters. They can survive a UTF-8 read of a
+# source file (e.g. a form-feed page break in a .py), but then break XML parsing
+# AND, on Windows, cause text-mode writes to fail with [Errno 22] Invalid
+# argument. Strip them before writing.
+_XML_ILLEGAL = re.compile(
+    "[^\x09\x0A\x0D\x20-\uD7FF\uE000-\uFFFD\U00010000-\U0010FFFF]"
+)
+
+
+def strip_illegal_xml_chars(text):
+    """Remove characters that are not legal in XML 1.0."""
+    return _XML_ILLEGAL.sub("", text)
 
 
 def extract_imports(file_content):
@@ -137,10 +152,22 @@ def create_project_document(directory_path, prefix="", compress_output=False):
     output_filename = f"pdoc_{folder_name}.xml"
     output_path = os.path.join(directory_path, output_filename)
 
+    # Strip XML-illegal control chars, then write atomically in BINARY mode.
+    # Binary avoids the Windows text-mode translation layer (the [Errno 22]
+    # source); temp-then-replace avoids leaving a half-written file if a
+    # OneDrive sync or crash interrupts the write.
+    output = strip_illegal_xml_chars(output)
+    tmp_path = output_path + ".tmp"
     try:
-        with open(output_path, 'w', encoding='utf-8') as f:
-            f.write(output)
+        with open(tmp_path, 'wb') as f:
+            f.write(output.encode('utf-8'))
+        os.replace(tmp_path, output_path)
     except Exception as e:
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except OSError:
+            pass
         raise IOError(f"Failed to write file {output_path}: {e}")
 
     if compress_output:
