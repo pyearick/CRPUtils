@@ -52,7 +52,9 @@ Design notes for BIG data
 from __future__ import annotations
 
 import os
+import shutil
 import sys
+import tempfile
 from typing import Iterable, Mapping, Optional, Sequence, Tuple, Union
 
 # xlwings is imported lazily inside build_pivot_workbook so that merely
@@ -121,6 +123,40 @@ def _validate_fields(df_columns: Iterable[str], *field_groups: Sequence[str]) ->
             "These pivot fields are not columns in the DataFrame: "
             f"{sorted(set(missing))}. Available columns: {sorted(available)}"
         )
+
+
+def _populate_pivot(
+    pt,
+    rows: Sequence[str],
+    columns: Sequence[str],
+    filters: Sequence[str],
+    value_specs: Sequence[Tuple[str, str, int]],
+    number_formats: Mapping[str, str],
+    show_row_grand: bool,
+    show_col_grand: bool,
+) -> None:
+    """Set the row/column/filter/value fields on an existing (empty) PivotTable.
+
+    Shared by build_pivot_workbook (new-workbook path) and add_pivot_to_workbook
+    (embed-into-existing path) so both stay identical. Value fields MUST be added
+    with AddDataField - setting Orientation to xlDataField silently fails.
+    """
+    for field in rows:
+        pt.PivotFields(field).Orientation = _XL_ROW_FIELD
+    for field in columns:
+        pt.PivotFields(field).Orientation = _XL_COLUMN_FIELD
+    for field in filters:
+        pt.PivotFields(field).Orientation = _XL_PAGE_FIELD
+
+    for field, agg_name, agg_code in value_specs:
+        caption = f"{agg_name.capitalize()} of {field}"
+        data_field = pt.AddDataField(pt.PivotFields(field), caption, agg_code)
+        fmt = number_formats.get(field)
+        if fmt:
+            data_field.NumberFormat = fmt
+
+    pt.ColumnGrand = show_col_grand
+    pt.RowGrand = show_row_grand
 
 
 def build_pivot_workbook(
@@ -252,24 +288,8 @@ def build_pivot_workbook(
         )
         pt = ws_pivot.api.PivotTables(pivot_table_name)
 
-        # --- Row / column / filter fields ---
-        for field in rows:
-            pt.PivotFields(field).Orientation = _XL_ROW_FIELD
-        for field in columns:
-            pt.PivotFields(field).Orientation = _XL_COLUMN_FIELD
-        for field in filters:
-            pt.PivotFields(field).Orientation = _XL_PAGE_FIELD
-
-        # --- Value fields: MUST use AddDataField (the key fix) ---
-        for field, agg_name, agg_code in value_specs:
-            caption = f"{agg_name.capitalize()} of {field}"
-            data_field = pt.AddDataField(pt.PivotFields(field), caption, agg_code)
-            fmt = number_formats.get(field)
-            if fmt:
-                data_field.NumberFormat = fmt
-
-        pt.ColumnGrand = show_col_grand
-        pt.RowGrand = show_row_grand
+        _populate_pivot(pt, rows, columns, filters, value_specs,
+                        number_formats, show_row_grand, show_col_grand)
 
         # Restore calculation and refresh once before saving.
         try:
@@ -299,6 +319,261 @@ def build_pivot_workbook(
                 app.kill()
             except Exception:
                 pass
+
+
+def _apply_pivot(wb, spec: Mapping, log) -> None:
+    """Build ONE native PivotTable on an already-open workbook (``wb`` is an
+    xlwings Book). ``spec`` is a mapping with the same keys as
+    ``add_pivot_to_workbook``'s parameters (source_sheet, rows, values, and the
+    optional columns/filters/pivot_sheet_name/pivot_table_name/source_range/
+    after_sheet/replace_existing/show_row_grand/show_col_grand/number_formats).
+    Raises on any problem (missing sheet, unknown field, empty values)."""
+    source_sheet = spec["source_sheet"]
+    rows = list(spec.get("rows") or [])
+    columns = list(spec.get("columns") or [])
+    filters = list(spec.get("filters") or [])
+    values = spec.get("values") or []
+    pivot_sheet_name = spec.get("pivot_sheet_name", "Pivot")
+    pivot_table_name = spec.get("pivot_table_name", "Pivot1")
+    source_range = spec.get("source_range")
+    after_sheet = spec.get("after_sheet")
+    replace_existing = spec.get("replace_existing", True)
+    show_row_grand = spec.get("show_row_grand", True)
+    show_col_grand = spec.get("show_col_grand", True)
+    number_formats = dict(spec.get("number_formats") or {})
+
+    if not rows and not columns:
+        raise ValueError("Provide at least one field in `rows` or `columns`.")
+    if not values:
+        raise ValueError("Provide at least one field in `values`.")
+    value_specs = _normalize_values(values)
+
+    # Recompute the sheet list each call: an earlier spec in a batch may have
+    # added the sheet this one wants to anchor after.
+    sheet_names = [s.name for s in wb.sheets]
+    if source_sheet not in sheet_names:
+        raise ValueError(
+            f"Source sheet '{source_sheet}' not found. "
+            f"Available sheets: {sheet_names}"
+        )
+    ws_source = wb.sheets[source_sheet]
+
+    if source_range:
+        src_rng = ws_source.range(source_range)
+    else:
+        # Contiguous table anchored at A1 (header row + data). Fast and
+        # reliable for a sheet that holds one table starting at A1.
+        src_rng = ws_source.range("A1").current_region
+
+    header = src_rng.rows[0].value
+    if not isinstance(header, (list, tuple)):
+        header = [header]
+    _validate_fields(header, rows, columns, filters,
+                     [f for f, _, _ in value_specs])
+
+    if pivot_sheet_name in sheet_names:
+        if replace_existing:
+            wb.sheets[pivot_sheet_name].delete()
+        else:
+            raise ValueError(
+                f"Sheet '{pivot_sheet_name}' already exists "
+                f"(pass replace_existing=True to overwrite)."
+            )
+
+    anchor = after_sheet if after_sheet in sheet_names else source_sheet
+    ws_pivot = wb.sheets.add(pivot_sheet_name, after=wb.sheets[anchor])
+
+    pivot_cache = wb.api.PivotCaches().Create(
+        SourceType=_XL_DATABASE,
+        SourceData=src_rng.api,
+    )
+    pivot_cache.CreatePivotTable(
+        TableDestination=ws_pivot.range("A3").api,
+        TableName=pivot_table_name,
+    )
+    pt = ws_pivot.api.PivotTables(pivot_table_name)
+    _populate_pivot(pt, rows, columns, filters, value_specs,
+                    number_formats, show_row_grand, show_col_grand)
+    log(f"  + pivot '{pivot_table_name}' on sheet '{pivot_sheet_name}' "
+        f"(source '{source_sheet}')")
+
+
+def add_pivots_to_workbook(
+    workbook_path: str,
+    pivots: Sequence[Mapping],
+    *,
+    strict: bool = False,
+    visible: bool = False,
+    logger=None,
+) -> str:
+    """
+    Embed one OR MORE native Excel PivotTables into an existing workbook, in a
+    single Excel session. Every other sheet (and its formatting) is preserved.
+
+    This is the path for the common CRPAF case: a script builds a multi-sheet
+    report with pandas/openpyxl, then - as a FINAL step - stamps pivot sheets on
+    top of some of those sheets. It MUST run after all openpyxl writes are done:
+    re-opening a pivot-bearing workbook in openpyxl (e.g. pandas ``mode='a'``)
+    strips the pivot cache.
+
+    Parameters
+    ----------
+    workbook_path : str
+        Path to the existing .xlsx. Saved in place (all sheets preserved).
+    pivots : sequence of mapping
+        One spec per pivot. Each mapping's keys mirror ``add_pivot_to_workbook``:
+        required ``source_sheet``, ``rows``, ``values``; optional ``columns``,
+        ``filters``, ``pivot_sheet_name``, ``pivot_table_name``, ``source_range``,
+        ``after_sheet``, ``replace_existing``, ``show_row_grand``,
+        ``show_col_grand``, ``number_formats``. Each source sheet must have its
+        header in row 1 with data starting at A1 (the CRPAF report convention).
+    strict : bool
+        If True, the first bad spec aborts the whole call (original workbook left
+        untouched). If False (default), a bad spec - e.g. its source sheet is
+        absent this run - is logged and skipped; the good pivots are still added.
+    visible, logger :
+        As in ``build_pivot_workbook``.
+
+    Returns
+    -------
+    str
+        The absolute path to the saved workbook.
+    """
+    log = logger.info if logger is not None else print
+
+    if sys.platform != "win32":
+        raise RuntimeError(
+            "add_pivots_to_workbook requires Windows + Excel (COM automation). "
+            f"Current platform is '{sys.platform}'."
+        )
+
+    try:
+        import xlwings as xw
+    except ImportError as exc:  # pragma: no cover - environment dependent
+        raise RuntimeError(
+            "xlwings is required to build native Excel PivotTables. "
+            "Install it (pip install xlwings) on a machine that also has "
+            "Excel installed."
+        ) from exc
+
+    pivots = list(pivots or [])
+    if not pivots:
+        raise ValueError("Provide at least one pivot spec in `pivots`.")
+
+    workbook_path = os.path.abspath(workbook_path)
+    if not os.path.exists(workbook_path):
+        raise FileNotFoundError(f"Workbook does not exist: {workbook_path}")
+
+    log(f"Embedding {len(pivots)} pivot(s) into {workbook_path}")
+
+    # Work on a copy in a plain temp dir, then copy it back over the original.
+    # This sidesteps two Excel/COM quirks: (1) SaveAs to the same path a workbook
+    # is open from raises "Cannot access"; (2) a bare Save() on a OneDrive-synced
+    # path can be redirected by AutoSave to the user's Documents folder.
+    work_dir = tempfile.mkdtemp(prefix="crp_pivot_")
+    work_path = os.path.join(work_dir, os.path.basename(workbook_path))
+    shutil.copyfile(workbook_path, work_path)
+
+    app = None
+    try:
+        app = xw.App(visible=visible, add_book=False)
+        app.display_alerts = False
+        app.screen_updating = False
+
+        wb = app.books.open(work_path)
+        try:
+            app.calculation = "manual"
+        except Exception:
+            pass
+
+        applied = 0
+        for spec in pivots:
+            try:
+                _apply_pivot(wb, spec, log)
+                applied += 1
+            except Exception as e:
+                if strict:
+                    raise
+                log(f"  ! skipped pivot for source sheet "
+                    f"{spec.get('source_sheet')!r}: {e}")
+
+        try:
+            app.calculation = "automatic"
+        except Exception:
+            pass
+
+        # In-place save of the temp copy (plain dir, so no AutoSave redirect),
+        # then close before copying back over the original.
+        wb.save()
+        wb.close()
+
+        shutil.copyfile(work_path, workbook_path)
+        log(f"Embedded {applied}/{len(pivots)} pivot(s). Saved: {workbook_path}")
+        return workbook_path
+
+    finally:
+        if app is not None:
+            try:
+                app.screen_updating = True
+            except Exception:
+                pass
+            try:
+                app.quit()
+            except Exception:
+                pass
+            try:
+                app.kill()
+            except Exception:
+                pass
+        try:
+            shutil.rmtree(work_dir, ignore_errors=True)
+        except Exception:
+            pass
+
+
+def add_pivot_to_workbook(
+    workbook_path: str,
+    source_sheet: str,
+    rows: Sequence[str],
+    values: Sequence[ValueSpec],
+    columns: Optional[Sequence[str]] = None,
+    filters: Optional[Sequence[str]] = None,
+    *,
+    pivot_sheet_name: str = "Pivot",
+    pivot_table_name: str = "Pivot1",
+    source_range: Optional[str] = None,
+    after_sheet: Optional[str] = None,
+    replace_existing: bool = True,
+    show_row_grand: bool = True,
+    show_col_grand: bool = True,
+    number_formats: Optional[Mapping[str, str]] = None,
+    visible: bool = False,
+    logger=None,
+) -> str:
+    """
+    Embed a single native Excel PivotTable into an existing workbook. Thin
+    convenience wrapper over ``add_pivots_to_workbook`` (strict=True, so a bad
+    spec raises rather than being silently skipped). See that function for the
+    behavioural details; parameters here map 1:1 to a single pivot spec.
+    """
+    spec = {
+        "source_sheet": source_sheet,
+        "rows": rows,
+        "values": values,
+        "columns": columns,
+        "filters": filters,
+        "pivot_sheet_name": pivot_sheet_name,
+        "pivot_table_name": pivot_table_name,
+        "source_range": source_range,
+        "after_sheet": after_sheet,
+        "replace_existing": replace_existing,
+        "show_row_grand": show_row_grand,
+        "show_col_grand": show_col_grand,
+        "number_formats": number_formats,
+    }
+    return add_pivots_to_workbook(
+        workbook_path, [spec], strict=True, visible=visible, logger=logger
+    )
 
 
 # =============================================================================
