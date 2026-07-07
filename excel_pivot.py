@@ -278,9 +278,14 @@ def build_pivot_workbook(
         # --- Pivot sheet ---
         ws_pivot = wb.sheets.add(pivot_sheet_name, after=ws_data)
 
+        # SourceData as a sheet-qualified address STRING, not the COM range
+        # object: the range form can raise E_INVALIDARG on some Excel builds.
+        source_addr = (
+            f"'{data_sheet_name.replace(chr(39), chr(39) * 2)}'!{source_range.address}"
+        )
         pivot_cache = wb.api.PivotCaches().Create(
             SourceType=_XL_DATABASE,
-            SourceData=source_range.api,
+            SourceData=source_addr,
         )
         pivot_cache.CreatePivotTable(
             TableDestination=ws_pivot.range("A3").api,
@@ -341,6 +346,7 @@ def _apply_pivot(wb, spec: Mapping, log) -> None:
     show_row_grand = spec.get("show_row_grand", True)
     show_col_grand = spec.get("show_col_grand", True)
     number_formats = dict(spec.get("number_formats") or {})
+    label_col_width = spec.get("label_col_width", 40)
 
     if not rows and not columns:
         raise ValueError("Provide at least one field in `rows` or `columns`.")
@@ -380,12 +386,19 @@ def _apply_pivot(wb, spec: Mapping, log) -> None:
                 f"(pass replace_existing=True to overwrite)."
             )
 
-    anchor = after_sheet if after_sheet in sheet_names else source_sheet
+    # Place the pivot sheet after `after_sheet` if given; otherwise append it at
+    # the end so the report's existing sheet order is left undisturbed.
+    anchor = after_sheet if after_sheet in sheet_names else sheet_names[-1]
     ws_pivot = wb.sheets.add(pivot_sheet_name, after=wb.sheets[anchor])
 
+    # SourceData MUST be a sheet-qualified address STRING. Passing the COM range
+    # object (src_rng.api) raises E_INVALIDARG (0x80070057) on some sheets/Excel
+    # builds - e.g. a styled report sheet with an autofilter - whereas the
+    # address form is reliable. Quote the sheet name (double any apostrophes).
+    source_addr = f"'{source_sheet.replace(chr(39), chr(39) * 2)}'!{src_rng.address}"
     pivot_cache = wb.api.PivotCaches().Create(
         SourceType=_XL_DATABASE,
-        SourceData=src_rng.api,
+        SourceData=source_addr,
     )
     pivot_cache.CreatePivotTable(
         TableDestination=ws_pivot.range("A3").api,
@@ -394,6 +407,13 @@ def _apply_pivot(wb, spec: Mapping, log) -> None:
     pt = ws_pivot.api.PivotTables(pivot_table_name)
     _populate_pivot(pt, rows, columns, filters, value_specs,
                     number_formats, show_row_grand, show_col_grand)
+
+    # Excel autofits the row-label column (A) to the widest label, which for long
+    # text fields balloons to the 255 cap. Set a sane fixed width instead
+    # (label_col_width=None leaves Excel's autofit alone).
+    if label_col_width is not None:
+        ws_pivot.range("A1").column_width = label_col_width
+
     log(f"  + pivot '{pivot_table_name}' on sheet '{pivot_sheet_name}' "
         f"(source '{source_sheet}')")
 
