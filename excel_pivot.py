@@ -134,12 +134,19 @@ def _populate_pivot(
     number_formats: Mapping[str, str],
     show_row_grand: bool,
     show_col_grand: bool,
+    sort: Optional[Mapping] = None,
 ) -> None:
     """Set the row/column/filter/value fields on an existing (empty) PivotTable.
 
     Shared by build_pivot_workbook (new-workbook path) and add_pivot_to_workbook
     (embed-into-existing path) so both stay identical. Value fields MUST be added
     with AddDataField - setting Orientation to xlDataField silently fails.
+
+    sort (optional): auto-sort a row/column field by one of the value fields, e.g.
+    {"field": "VendorName", "by": "FGRevAtRisk$", "ascending": False} makes the
+    pivot open with the biggest-dollar vendor on top instead of alphabetical. "by"
+    is a value field name (its data-field caption is resolved automatically); pass
+    an explicit caption if it isn't one of the value fields.
     """
     for field in rows:
         pt.PivotFields(field).Orientation = _XL_ROW_FIELD
@@ -157,6 +164,20 @@ def _populate_pivot(
 
     pt.ColumnGrand = show_col_grand
     pt.RowGrand = show_row_grand
+
+    if sort:
+        # Resolve the value field's caption (e.g. 'FGRevAtRisk$' -> 'Sum of
+        # FGRevAtRisk$'); fall back to the given string if it's already a caption.
+        by = sort.get("by")
+        caption = by
+        for f, agg_name, _ in value_specs:
+            if f == by:
+                caption = f"{agg_name.capitalize()} of {f}"
+                break
+        # xlAscending = 1, xlDescending = 2 — AutoSort the field by a data field
+        # so the pivot opens value-ranked rather than alphabetical.
+        order_code = 1 if sort.get("ascending", False) else 2
+        pt.PivotFields(sort["field"]).AutoSort(order_code, caption)
 
 
 def build_pivot_workbook(
@@ -347,6 +368,7 @@ def _apply_pivot(wb, spec: Mapping, log) -> None:
     show_col_grand = spec.get("show_col_grand", True)
     number_formats = dict(spec.get("number_formats") or {})
     label_col_width = spec.get("label_col_width", 40)
+    sort = spec.get("sort")
 
     if not rows and not columns:
         raise ValueError("Provide at least one field in `rows` or `columns`.")
@@ -406,7 +428,7 @@ def _apply_pivot(wb, spec: Mapping, log) -> None:
     )
     pt = ws_pivot.api.PivotTables(pivot_table_name)
     _populate_pivot(pt, rows, columns, filters, value_specs,
-                    number_formats, show_row_grand, show_col_grand)
+                    number_formats, show_row_grand, show_col_grand, sort=sort)
 
     # Excel autofits the row-label column (A) to the widest label, which for long
     # text fields balloons to the 255 cap. Set a sane fixed width instead
