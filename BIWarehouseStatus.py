@@ -79,6 +79,59 @@ def get_readiness_detail() -> List[Dict]:
         return []
 
 
+def get_table_census(source_db: str = "BIWarehouse",
+                     schema: str = "BIData") -> List[Dict]:
+    """Row count of EVERY table under one BIWarehouse source schema, from metadata.
+
+    The readiness view (vw_BIWarehouseReadiness) deliberately tracks only the ~10
+    tables with tuned floors. This is the wide-angle companion (CRP-010): it lists
+    ALL <source_db>.<schema> tables with their row counts so we can spot any table
+    that is empty/near-empty mid-replication, not just the curated ten.
+
+    Uses sys.partitions (index_id 0/1) — the same instant, no-scan metadata count
+    PLM-078 moved the view's unfiltered checks onto. Safe to call every run.
+
+    Returns [{'table': '<db>.<schema>.<name>', 'rows': int}, ...] (empty on error).
+    """
+    try:
+        with _get_connection() as conn:
+            cursor = conn.cursor()
+            # sys objects are per-database, so 3-part-name into the source DB.
+            cursor.execute(f"""
+                SELECT t.name AS TableName, SUM(p.rows) AS TableRows
+                FROM [{source_db}].sys.tables t
+                JOIN [{source_db}].sys.schemas s ON t.schema_id = s.schema_id
+                JOIN [{source_db}].sys.partitions p
+                     ON p.object_id = t.object_id AND p.index_id IN (0, 1)
+                WHERE s.name = ?
+                GROUP BY t.name
+                ORDER BY t.name
+            """, (schema,))
+            return [
+                {'table': f"{source_db}.{schema}.{r[0]}",
+                 'rows':  int(r[1]) if r[1] is not None else 0}
+                for r in cursor.fetchall()
+            ]
+    except Exception as e:
+        logger.error(f"get_table_census({source_db}.{schema}) failed: {e}")
+        return []
+
+
+def find_empty_tables(min_rows: int = 1,
+                      source_db: str = "BIWarehouse",
+                      schema: str = "BIData") -> List[Dict]:
+    """Every <source_db>.<schema> table currently below min_rows (default: 0 rows).
+
+    A table at 0 rows during a run is the classic mid-replication TRUNCATE window
+    (snapshot replication truncates then bulk-inserts article by article). This is
+    report-only wide-angle visibility for the orchestrator preflight (CRP-010) — it
+    does NOT itself gate is_ready(); the caller decides what an empty table means
+    for its job. Returns [{'table', 'rows'}, ...] (empty list = nothing below floor,
+    OR the census couldn't be read — check logs).
+    """
+    return [d for d in get_table_census(source_db, schema) if d['rows'] < min_rows]
+
+
 def _filter_by_source(detail: List[Dict], required_sources: Optional[List[str]]) -> List[Dict]:
     """Filter readiness rows to only those matching required_sources prefixes."""
     if not required_sources:
@@ -140,9 +193,13 @@ def is_ready(required_sources: Optional[List[str]] = None,
                           An unrelated empty source can't block it. Applied together with
                           required_sources (AND) when both are given. The readiness view
                           only tracks ~10 tables; a requested table the view doesn't track
-                          is logged and skipped (un-gateable) rather than treated as failed
-                          — if NONE of the requested tables are tracked, the check warns and
-                          returns ready (there is nothing gate-able to check).
+                          is logged and skipped (un-gateable) rather than treated as failed.
+                          If SOME requested tables are tracked, the check gates on those and
+                          skips the untracked ones (logged). If NONE of the requested tables
+                          are tracked, the check now returns NOT ready (fail-safe, CRP-010) —
+                          previously it returned ready, which let a job proceed against an
+                          unverified warehouse. Name tables the readiness view actually
+                          tracks, or use required_sources=['BIWarehouse'].
         stability_seconds: Delay between the two samples. Default 15s.
 
     Returns:
@@ -164,10 +221,14 @@ def is_ready(required_sources: Optional[List[str]] = None,
     if required_sources and not first:
         return False, f"No readiness rows match required_sources={required_sources}"
 
-    # Table scoping: warn on prefixes the view doesn't track, and if NONE of the
-    # requested tables are tracked, treat as un-gateable (warn + pass) rather than
-    # false-block — the whole point of table-level scoping is to not be blocked by
-    # tables this job doesn't depend on.
+    # Table scoping: warn on prefixes the view doesn't track. A mixed list still
+    # gates on the tracked subset (untracked ones are logged and skipped — nothing
+    # to check them against). But if NONE of the requested tables are tracked there
+    # is nothing gate-able, so we FAIL SAFE (CRP-010): return NOT ready rather than
+    # let the job proceed against a warehouse we never actually verified. The old
+    # behaviour returned ready here, which is exactly how a job could run on a
+    # half-synced BIWarehouse. A caller hitting this has mis-scoped — it should name
+    # tables the readiness view tracks, or use required_sources=['BIWarehouse'].
     first, untracked = _filter_by_table(first, required_tables)
     if untracked:
         logger.warning(
@@ -175,11 +236,12 @@ def is_ready(required_sources: Optional[List[str]] = None,
             ', '.join(untracked)
         )
     if required_tables and not first:
-        logger.warning(
-            "None of required_tables=%s are tracked by the readiness view — "
-            "cannot gate, treating as ready.", required_tables
-        )
-        return True, ""
+        msg = (f"None of required_tables={required_tables} are tracked by the "
+               f"readiness view (untracked: {untracked}) — cannot gate. Failing "
+               f"safe (NOT ready): name a tracked table or use "
+               f"required_sources=['BIWarehouse'].")
+        logger.error(msg)
+        return False, msg
 
     if not first:
         return False, "No readiness rows to check after scoping"
@@ -235,9 +297,18 @@ if __name__ == "__main__":
     if reason:
         print(f"Reason: {reason}")
 
-    print("\nPer-source detail:")
+    print("\nPer-source detail (tracked tables with tuned floors):")
     for d in get_readiness_detail():
         flag = "OK " if d['ready'] else "LOW"
         print(f"  [{flag}] {d['table']:<48} {d['actual']:>14,} / {d['expected']:>12,}")
+
+    # CRP-010 wide-angle sweep: any BIWarehouse.BIData table currently empty.
+    print("\nAll-tables census (BIWarehouse.BIData) — empty-table sweep:")
+    empties = find_empty_tables()
+    if empties:
+        for d in empties:
+            print(f"  [EMPTY] {d['table']}")
+    else:
+        print("  (no empty tables — or census unreadable; see log)")
 
     sys.exit(0 if ready else 1)
