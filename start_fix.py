@@ -74,11 +74,24 @@ TEMP_DIR = r"C:/Temp/StartFix"
 # elsewhere, update this - 'where claude' in cmd prints the current path.
 CLAUDE_CMD = r"C:\Users\pyearick.CRP\AppData\Roaming\npm\claude.cmd"
 
-# Path to ConEmu64.exe - the preferred terminal for interactive Start Fix
-# sessions (proper copy/paste, resizing, scrollback - unlike a raw cmd console).
-# Leave as None to auto-detect (PATH + common install locations). Set to a full
-# path to override, e.g. a portable / unzipped build:
-#   CONEMU_CMD = r"C:/Tools/ConEmuPack/ConEmu64.exe"
+# Path to wt.exe (Windows Terminal) - the preferred terminal for interactive
+# Start Fix sessions (proper copy/paste, resizing, scrollback - unlike a raw
+# cmd console). Leave as None to auto-detect. Set to a full path to override,
+# e.g. a portable / unzipped build:
+#   WT_CMD = r"C:\Tools\WindowsTerminal\terminal-1.24.11911.0\wt.exe"
+WT_CMD = None
+
+# Extra folders searched for a portable Windows Terminal build when WT_CMD is
+# None and wt.exe is not on PATH. Each folder is checked directly and one level
+# deep, so a versioned extraction folder (terminal-1.24.11911.0) is found
+# without pinning the version number here.
+WT_SEARCH_DIRS = [
+    r"C:\Tools\WindowsTerminal",
+    os.path.join(os.environ.get("USERPROFILE", ""), r".local\bin\WindowsTerminal"),
+]
+
+# Path to ConEmu64.exe - retained as a fallback for machines that still have
+# ConEmu installed. Same override semantics as WT_CMD.
 CONEMU_CMD = None
 
 # Tools Claude Code is allowed to use in HEADLESS (Refresh Synopsis) runs.
@@ -473,6 +486,87 @@ def read_synopsis(project_dir, project):
 
 
 # =============================================================================
+# REFERENCE NOTES (loose project .md "bag of clues")
+# =============================================================================
+
+def gather_reference_docs(project_dir, item, top_k=6, head_lines=15):
+    """
+    Rank the loose *.md notes in a project's TOP-LEVEL folder by relevance to
+    this punchlist item, and return an annotated menu of pointers.
+
+    A project accumulates conclusion write-ups, specs, drafts and meeting briefs
+    (PLM_080_*.md, *_Conclusions.md, *_Architecture.md, ...) that record where
+    prior analyses LANDED and why - the intent and gotchas the code alone won't
+    tell you. We do NOT embed their bodies (that would blow the brief and bury
+    the signal); we hand Claude Code a curated, ranked menu and let it Read the
+    ones that bear on the task.
+
+    Scoring (deterministic, no LLM):
+      +8  the item's number appears in the filename   (PLM-078 -> '078')
+      +2  per item keyword found in the filename
+      +1  per item keyword found in the first `head_lines` lines
+      +3  the filename looks like a conclusion / spec / draft / findings note
+
+    Keywords are product codes / acronyms / capitalized tokens pulled from the
+    item's title + description. <project>_Synopsis.md is skipped (the brief
+    references it separately).
+
+    Returns [{'path', 'one_liner', 'score'}] sorted best-first, at most top_k.
+    """
+    num = re.sub(r'\D', '', item.get('item_number') or '')
+    if len(num) < 2:
+        num = ''  # too short to match reliably (avoid '2' matching everything)
+    text = f"{item.get('title', '')} {item.get('description', '')}"
+    keywords = {t.lower() for t in re.findall(r'\b[A-Z0-9]{3,}\b', text)}
+    # Drop the project-prefix token (e.g. 'PLM') - it appears in nearly every
+    # filename in the folder, so it adds noise instead of discriminating.
+    prefix = re.match(r'[A-Za-z]+', item.get('item_number') or '')
+    if prefix:
+        keywords.discard(prefix.group(0).lower())
+    spec_hints = ('_conclusion', '_brief', '_architecture', '_draft',
+                  '_readiness', '_spec', '_findings', '_exhibit')
+
+    try:
+        candidates = sorted(Path(project_dir).glob('*.md'))
+    except OSError:
+        return []
+
+    scored = []
+    for path in candidates:
+        name = path.name.lower()
+        if name.endswith('_synopsis.md'):
+            continue
+        try:
+            with open(path, 'r', encoding='utf-8', errors='replace') as f:
+                head = ''.join(f.readline() for _ in range(head_lines))
+        except OSError:
+            continue
+        head_lc = head.lower()
+
+        score = 8 if (num and num in name) else 0
+        score += sum(2 for k in keywords if k in name)
+        score += sum(1 for k in keywords if k in head_lc)
+        if any(h in name for h in spec_hints):
+            score += 3
+        if score <= 0:
+            continue
+
+        first_heading = next(
+            (ln.lstrip('#').strip()
+             for ln in head.splitlines() if ln.lstrip().startswith('#')),
+            path.stem,
+        )
+        scored.append({
+            'path': str(path),
+            'one_liner': first_heading[:100],
+            'score': score,
+        })
+
+    scored.sort(key=lambda d: d['score'], reverse=True)
+    return scored[:top_k]
+
+
+# =============================================================================
 # STEP 3 - PROMPT ASSEMBLY
 # =============================================================================
 
@@ -611,7 +705,8 @@ def condense_inventory(inventory_text, keep_tables=True):
 
 def assemble_start_fix_prompt(context, synopsis, inventory_text,
                               project, project_dir, pdoc_path,
-                              blast_radius_text=None, xref_path=None):
+                              blast_radius_text=None, xref_path=None,
+                              ref_docs=None):
     """
     Build the Start Fix brief - punchlist neighborhood + condensed inventory,
     with the synopsis referenced on disk rather than embedded.
@@ -707,6 +802,22 @@ def assemble_start_fix_prompt(context, synopsis, inventory_text,
                      "the source code.)")
     lines.append("")
 
+    # --- Reference notes (curated menu of on-disk project .md, pointers) ---
+    lines.append("## Reference Notes In This Project")
+    lines.append("")
+    if ref_docs:
+        lines.append("These on-disk notes look relevant to this item - prior "
+                     "conclusions, specs, drafts and analyses that record what "
+                     "we decided and the gotchas the code alone won't tell you. "
+                     "READ the ones that bear on the task before proposing "
+                     "changes (they are ranked most-relevant first):")
+        lines.append("")
+        for d in ref_docs:
+            lines.append(f"- `{d['path']}` - {d['one_liner']}")
+    else:
+        lines.append("(No project notes matched this item.)")
+    lines.append("")
+
     # --- Blast radius (embedded: small, high-value, task-central) ---
     if blast_radius_text:
         lines.append(blast_radius_text.strip())
@@ -789,6 +900,47 @@ def claude_available():
     return shutil.which(CLAUDE_CMD)
 
 
+def _find_wt():
+    """
+    Resolve the path to wt.exe (Windows Terminal), or None if it cannot
+    be found.
+
+    Checks the WT_CMD override first, then PATH, then WT_SEARCH_DIRS (both the
+    folder itself and one level below it, to catch versioned portable
+    extractions like terminal-1.24.11911.0).
+
+    Note on portable installs: wt.exe only lands on PATH after the user logs
+    off and back on, so the directory scan is what makes Start Fix work in the
+    session where Windows Terminal was first unzipped.
+    """
+    if WT_CMD:
+        return WT_CMD if os.path.isfile(WT_CMD) else None
+
+    found = shutil.which("wt") or shutil.which("wt.exe")
+    if found:
+        return found
+
+    for base in WT_SEARCH_DIRS:
+        if not base or not os.path.isdir(base):
+            continue
+        direct = os.path.join(base, "wt.exe")
+        if os.path.isfile(direct):
+            return direct
+        try:
+            subdirs = sorted(
+                (os.path.join(base, d) for d in os.listdir(base)
+                 if os.path.isdir(os.path.join(base, d))),
+                reverse=True,          # newest versioned folder wins
+            )
+        except OSError:
+            continue
+        for sub in subdirs:
+            candidate = os.path.join(sub, "wt.exe")
+            if os.path.isfile(candidate):
+                return candidate
+    return None
+
+
 def _find_conemu():
     """
     Resolve the path to ConEmu64.exe, or None if it cannot be found.
@@ -819,8 +971,8 @@ def launch_claude_code_interactive(project_dir, brief_path):
     A tiny .bat is written to TEMP_DIR and launched, which avoids Windows
     nested-quoting problems with paths that contain spaces.
 
-    Prefers ConEmu (good copy/paste, resizing, scrollback); falls back to
-    Windows Terminal (wt.exe), then a classic cmd console.
+    Prefers Windows Terminal (good copy/paste, resizing, scrollback); falls
+    back to ConEmu if it is still installed, then a classic cmd console.
     """
     os.makedirs(TEMP_DIR, exist_ok=True)
     pointer = _pointer_prompt(brief_path)
@@ -833,27 +985,43 @@ def launch_claude_code_interactive(project_dir, brief_path):
         f.write(f'cd /d "{project_dir}"\r\n')
         f.write(f'{CLAUDE_CMD} "{pointer}"\r\n')
 
+    title = "Start Fix - Claude Code"
+
+    # Windows Terminal splits its command line on ';' to start extra tabs, so
+    # any semicolon in a path handed to it has to be escaped or the rest of the
+    # command is swallowed. TEMP_DIR has none today; this keeps it safe if it
+    # ever moves somewhere exotic.
+    wt_bat = bat_path.replace(";", "\\;")
+
+    wt = _find_wt()
     conemu = _find_conemu()
-    if conemu:
-        # ConEmu: -Title names the tab. -run must be LAST - ConEmu treats
-        # everything after it as the command line. cmd /k runs the bat and
-        # keeps the pane open after Claude Code exits. The bat lives in
-        # TEMP_DIR (no spaces), so its path quotes cleanly here; any spaces
-        # in project_dir are handled inside the bat by 'cd /d'.
-        launch = (f'"{conemu}" -Title "Start Fix - Claude Code" '
-                  f'-run cmd /k "{bat_path}"')
-        terminal = "ConEmu"
-    elif shutil.which("wt"):
-        # Windows Terminal: --title sets the tab name; cmd /k runs the bat
-        # and keeps the pane open after Claude Code exits.
-        launch = f'wt.exe --title "Start Fix - Claude Code" cmd /k "{bat_path}"'
+
+    if wt:
+        # Windows Terminal: --title names the tab. cmd /k runs the bat and
+        # keeps the pane open after Claude Code exits. Passed as an argument
+        # list (no shell) so the title quotes correctly without nesting.
+        launch = [wt, "--title", title, "cmd", "/k", wt_bat]
+        use_shell = False
         terminal = "Windows Terminal"
+    elif conemu:
+        # ConEmu: -Title names the tab. -run must be LAST - ConEmu treats
+        # everything after it as the command line. The bat lives in TEMP_DIR
+        # (no spaces), so its path quotes cleanly here; any spaces in
+        # project_dir are handled inside the bat by 'cd /d'.
+        launch = [conemu, "-Title", title, "-run", "cmd", "/k", bat_path]
+        use_shell = False
+        terminal = "ConEmu"
     else:
         # Fallback: classic cmd console via 'start' (first quoted token = title).
-        launch = f'start "Start Fix - Claude Code" cmd /k "{bat_path}"'
+        # This one needs the shell - 'start' is a cmd builtin, not an exe.
+        launch = f'start "{title}" cmd /k "{bat_path}"'
+        use_shell = True
         terminal = "cmd"
 
-    subprocess.Popen(launch, shell=True)
+    # Note: wt.exe is a launcher, not the terminal itself - it hands off to the
+    # real window and exits immediately. Do not wait() on this handle or read
+    # its return code as a signal that the fix session finished.
+    subprocess.Popen(launch, shell=use_shell)
     logger.info(f"Launched interactive Claude Code via {terminal} ({bat_path})")
     return bat_path
 
@@ -1241,6 +1409,7 @@ def prepare_start_fix_brief(context, project, project_dir, pdoc_path,
         {"inventory_text": "", "blast_radius_text": None, "xref_path": None}
 
     synopsis = read_synopsis(project_dir, project)  # noqa: F821
+    ref_docs = gather_reference_docs(project_dir, context['item'])
 
     return assemble_start_fix_prompt(  # noqa: F821
         context=context,
@@ -1251,6 +1420,7 @@ def prepare_start_fix_brief(context, project, project_dir, pdoc_path,
         pdoc_path=pdoc_path,
         blast_radius_text=sl["blast_radius_text"],
         xref_path=sl["xref_path"],
+        ref_docs=ref_docs,
     )
 
 
