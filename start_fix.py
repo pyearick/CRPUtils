@@ -861,16 +861,22 @@ def assemble_start_fix_prompt(context, synopsis, inventory_text,
     return "\n".join(lines)
 
 
-def write_brief_file(text, project, kind):
+def write_brief_file(text, name_stem, kind):
     """
     Write an assembled brief (or the synopsis prompt) to a transient file in
-    TEMP_DIR. 'kind' is a short tag, e.g. 'StartFix' or 'Synopsis'.
+    TEMP_DIR, named `{name_stem}_{kind}_{timestamp}.md`.
+
+    'kind' is a short tag, e.g. 'StartFix' or 'Synopsis'. 'name_stem' is the
+    leading token: the punchlist item number for a StartFix brief (so the file
+    names itself by the item in play, e.g. PLM-081_StartFix_...), or the project
+    name for a Synopsis brief. WorkLogGUI parses this back out, anchoring on
+    '_StartFix_', so keep that separator intact.
     Returns the file path.
     """
     os.makedirs(TEMP_DIR, exist_ok=True)
     timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
     path = os.path.normpath(
-        os.path.join(TEMP_DIR, f"{project}_{kind}_{timestamp}.md"))
+        os.path.join(TEMP_DIR, f"{name_stem}_{kind}_{timestamp}.md"))
     with open(path, 'w', encoding='utf-8') as f:
         f.write(text)
     logger.info(f"Brief written: {path}")
@@ -1144,7 +1150,14 @@ def start_fix(project, item_ref, dry_run=False):
     context = gather_punchlist_context(item)
     pdoc_path = build_pdoc(project_dir)
     brief = prepare_start_fix_brief(context, project, project_dir, pdoc_path)
-    brief_path = write_brief_file(brief, project, "StartFix")
+    # Name the brief by the punchlist item in play (e.g. PLM-081_StartFix_...),
+    # falling back to the project name when the item has no number. Sanitize to
+    # a filesystem-safe stem; WorkLogGUI maps the item number back to a project.
+    stem = (item['item_number'] or '').strip()
+    if not stem or stem == '(no #)':
+        stem = project
+    stem = re.sub(r'[^A-Za-z0-9._-]', '_', stem)
+    brief_path = write_brief_file(brief, stem, "StartFix")
     result['brief_path'] = brief_path
 
     if dry_run:

@@ -53,13 +53,17 @@ SKIP_FOLDERS = {
 }
 
 # Claude Code StartFix briefs land here, named:
-#   {Project}_StartFix_{YYYYMMDD}_{HHMMSS}.md
-# The project and exact start time are parsed from the filename. The regex
-# anchors on "_StartFix_" so project names containing underscores (e.g.
-# eBayWT_NF) are captured intact.
+#   {ItemNumber}_StartFix_{YYYYMMDD}_{HHMMSS}.md   (current, e.g. PLM-081_...)
+#   {Project}_StartFix_{YYYYMMDD}_{HHMMSS}.md       (legacy, e.g. CRPUtils_...)
+# The leading token and exact start time are parsed from the filename. The regex
+# anchors on "_StartFix_" so a token containing underscores (a legacy project
+# name like eBayWT_NF) is captured intact. The token is resolved to a project
+# via the ItemNumber->Project map (see _load_item_project_map): a current
+# item-number token maps to its project; a legacy project-name token isn't in
+# the map and falls through to itself - both land on the right project.
 STARTFIX_DIR = r"C:\Temp\StartFix"
 STARTFIX_RE = re.compile(
-    r'^(?P<project>.+)_StartFix_(?P<date>\d{8})_(?P<time>\d{6})\.md$',
+    r'^(?P<token>.+)_StartFix_(?P<date>\d{8})_(?P<time>\d{6})\.md$',
     re.IGNORECASE
 )
 
@@ -153,15 +157,41 @@ def _check_file(filepath, start, end, source, project, results):
         pass
 
 
+def _load_item_project_map():
+    """
+    Return {ItemNumber: Project} from PMA_PunchlistItems, used to resolve a
+    StartFix brief's leading token (now the punchlist item number) back to its
+    project for session clustering and the Project column.
+
+    Returns {} on any DB error - callers fall back to using the token as-is, so
+    a scan never fails just because the map is unavailable.
+    """
+    try:
+        conn = get_connection()
+        cursor = conn.cursor()
+        cursor.execute("""
+            SELECT DISTINCT ItemNumber, Project
+            FROM [dbo].[PMA_PunchlistItems]
+            WHERE ItemNumber IS NOT NULL
+        """)
+        mapping = {row[0]: row[1] for row in cursor.fetchall() if row[1]}
+        cursor.close()
+        conn.close()
+        return mapping
+    except Exception as e:
+        logger.warning(f"Could not load ItemNumber->Project map: {e}")
+        return {}
+
+
 def scan_startfix(year, month):
     """
     Scan C:\\Temp\\StartFix for Claude Code StartFix briefs created in the
-    given month. The filename encodes both the project and the exact start
-    timestamp, so each brief is an accurately project-attributed "work
-    started" marker.
+    given month. The filename encodes the punchlist item number (legacy briefs:
+    the project name) and the exact start timestamp, so each brief is an
+    accurately project-attributed "work started" marker.
 
     Returns event dicts shaped like scan_files() output (source='StartFix',
-    project parsed from the name, 'modified' = parsed start time) so they
+    project resolved from the name, 'modified' = parsed start time) so they
     fold straight into session clustering and the File Activity sheet.
     Falls back to file mtime if a name parses oddly.
     """
@@ -175,6 +205,12 @@ def scan_startfix(year, month):
     if not base.exists():
         logger.warning(f"StartFix directory not found: {STARTFIX_DIR}")
         return results
+
+    # Resolve the filename's leading token to a project. A current item-number
+    # token (PLM-081) maps to its project; a legacy project-name token isn't a
+    # key and falls through to itself. No collision: item numbers carry a -NNN
+    # suffix that folder names don't.
+    item_project_map = _load_item_project_map()
 
     for f in base.iterdir():
         if not f.is_file():
@@ -201,9 +237,12 @@ def scan_startfix(year, month):
         except OSError:
             size_kb = 0.0
 
+        token = m.group('token')
+        project = item_project_map.get(token, token)
+
         results.append({
             'source': 'StartFix',
-            'project': m.group('project'),
+            'project': project,
             'filename': f.name,
             'modified': started,
             'size_kb': size_kb,
