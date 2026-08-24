@@ -1,0 +1,18 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(git *)",
+      "Bash(.venv\\\\Scripts\\\\python.exe ScriptExporter.py)",
+      "Bash(.venv\\\\Scripts\\\\python.exe ro_data.py)",
+      "PowerShell(Test-Path *)",
+      "Bash(sed 's/_StartFix_[0-9]*_[0-9]*\\\\.md//')",
+      "Bash(gh pr *)",
+      "Bash(start \"\" \"https://github.com/pyearick/CRPUtils/compare/master...crp-006-worklog-startfix?expand=1\")",
+      "Bash(/c/Program Files/GitHub CLI/gh.exe *)",
+      "Bash(/c/Program Files/GitHub CLI/gh.exe auth *)",
+      "Bash(/c/Program Files/GitHub CLI/gh.exe pr *)",
+      "Bash(\"/c/Program Files/GitHub CLI/gh.exe\" pr view 1)",
+      "Bash(tasklist //FI \"IMAGENAME eq EXCEL.EXE\")"
+    ]
+  }
+}
