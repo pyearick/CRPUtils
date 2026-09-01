@@ -269,7 +269,7 @@ def fetch_punchlist_activity(year, month):
     cursor = conn.cursor()
 
     sql = """
-        SELECT PunchlistItemID, Project, ItemNumber, Title, Status, Priority,
+        SELECT PunchlistItemID, Project, ItemNumber, Title, Description, Status, Priority,
                CreatedDate, LastModifiedDate, CompletedDate
         FROM [dbo].[PMA_PunchlistItems]
         WHERE (CreatedDate BETWEEN ? AND ?)
@@ -459,27 +459,41 @@ def export_xlsx(year, month, sessions, file_results, punchlist_items, startfix_e
     ws_punch = wb.create_sheet("Punchlist Activity")
 
     punch_headers = [
-        'Project', 'Item #', 'Title', 'Status', 'Priority',
+        'Project', 'Item #', 'Title', 'Description', 'Status', 'Priority',
         'Created', 'Modified', 'Completed'
     ]
-    punch_widths = [16, 12, 50, 14, 10, 18, 18, 18]
+    punch_widths = [16, 12, 50, 60, 14, 10, 18, 18, 18]
     style_header(ws_punch, punch_headers, punch_widths)
+    desc_align = Alignment(wrap_text=True, vertical='top')
+    # Excel cell value max; NVARCHAR(MAX) can exceed it
+    excel_cell_max = 32767
 
     for row_idx, item in enumerate(punchlist_items, 2):
         ws_punch.cell(row=row_idx, column=1, value=item['Project']).font = data_font
         ws_punch.cell(row=row_idx, column=2, value=item['ItemNumber']).font = data_font
         ws_punch.cell(row=row_idx, column=3, value=item['Title'][:80]).font = data_font
-        ws_punch.cell(row=row_idx, column=4, value=item['Status']).font = data_font
-        ws_punch.cell(row=row_idx, column=5, value=item['Priority']).font = data_font
 
-        for col_idx, date_key in [(6, 'CreatedDate'), (7, 'LastModifiedDate'), (8, 'CompletedDate')]:
+        desc_text = item.get('Description') or ''
+        if len(desc_text) > excel_cell_max:
+            desc_text = desc_text[:excel_cell_max - 3] + '...'
+        desc_cell = ws_punch.cell(row=row_idx, column=4, value=desc_text or None)
+        desc_cell.font = data_font
+        desc_cell.alignment = desc_align
+        if desc_text:
+            approx_lines = max(desc_text.count('\n') + 1, (len(desc_text) - 1) // 55 + 1)
+            ws_punch.row_dimensions[row_idx].height = min(75, 15 * min(approx_lines, 5))
+
+        ws_punch.cell(row=row_idx, column=5, value=item['Status']).font = data_font
+        ws_punch.cell(row=row_idx, column=6, value=item['Priority']).font = data_font
+
+        for col_idx, date_key in [(7, 'CreatedDate'), (8, 'LastModifiedDate'), (9, 'CompletedDate')]:
             dt_val = item.get(date_key)
             cell = ws_punch.cell(row=row_idx, column=col_idx, value=dt_val)
             cell.font = data_font
             if dt_val:
                 cell.number_format = date_fmt
 
-        for col in range(1, 9):
+        for col in range(1, 10):
             ws_punch.cell(row=row_idx, column=col).border = thin_border
 
     # --- Save ---
